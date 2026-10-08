@@ -1,0 +1,17 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# Some React Native libraries (LiveKit, CallKit bridges) still assume a hoisted
+# node_modules layout. Hoisting avoids native build resolution failures.
+nodeLinker: hoisted
+
+# pnpm blocks dependency install scripts by default; allow only the ones we need.
+allowBuilds:
+  esbuild: true
+  unrs-resolver: true
+  workerd: true
+
+# Never block on the interactive "remove node_modules?" prompt (it hangs CI
+# and other non-interactive shells). node_modules is always reproducible.
+confirmModulesPurge: false

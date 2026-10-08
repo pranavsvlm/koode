@@ -1,0 +1,38 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "koode-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Non-secret configuration. Secrets go in .dev.vars locally and
+  // `wrangler secret put` remotely — never in this file.
+  "vars": {
+    "ENVIRONMENT": "development",
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "koode",
+      // Placeholder for local development. Replace with the real ID from
+      // `wrangler d1 create koode` before any remote deploy (see docs/SETUP.md).
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+
+  "r2_buckets": [
+    {
+      // Private bucket: no public access, served only via authorized Worker routes.
+      "binding": "MEDIA",
+      "bucket_name": "koode-media",
+    },
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "CONVERSATION_ROOM", "class_name": "ConversationRoom" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ConversationRoom"] }],
+}
