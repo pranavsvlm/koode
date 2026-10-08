@@ -1,25 +1,98 @@
 import '../../global.css';
+import '@/theme/interop';
 
 import { SplashScreen, Stack } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { KeyboardProvider } from 'react-native-keyboard-controller';
+import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
+import { useDevTour } from '@/dev/tour';
+import { DialogProvider, ToastProvider } from '@/components/ui';
+import { useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
-import { ThemeProvider } from '@/theme/ThemeProvider';
+import { useSession } from '@/stores/session';
+import { ThemeProvider, useThemeColors } from '@/theme/ThemeProvider';
 
 void SplashScreen.preventAutoHideAsync();
 
-/** Wait for persisted preferences so the first frame uses the right theme. */
-function usePreferencesHydrated() {
-  const [hydrated, setHydrated] = useState(() => usePreferences.persist.hasHydrated());
+/** Wait for persisted stores so the first frame has the right theme and route. */
+function useHydrated() {
+  const check = () => usePreferences.persist.hasHydrated() && useSession.persist.hasHydrated();
+  const [hydrated, setHydrated] = useState(check);
   useEffect(() => {
     if (hydrated) return;
-    return usePreferences.persist.onFinishHydration(() => setHydrated(true));
+    const update = () => setHydrated(check());
+    const unsubs = [
+      usePreferences.persist.onFinishHydration(update),
+      useSession.persist.onFinishHydration(update),
+    ];
+    update();
+    return () => unsubs.forEach((u) => u());
   }, [hydrated]);
   return hydrated;
 }
 
+function RootStack() {
+  const colors = useThemeColors();
+  const signedIn = useSession((s) => s.status === 'signedIn');
+  const loadChat = useChat((s) => s.load);
+  useDevTour(process.env.EXPO_PUBLIC_DEV_TOUR);
+
+  useEffect(() => {
+    if (signedIn) void loadChat();
+  }, [signedIn, loadChat]);
+
+  return (
+    <Stack
+      screenOptions={{
+        headerShown: false,
+        contentStyle: { backgroundColor: colors.background },
+      }}
+    >
+      <Stack.Screen name="index" />
+      <Stack.Protected guard={!signedIn}>
+        <Stack.Screen name="(auth)" />
+      </Stack.Protected>
+      <Stack.Protected guard={signedIn}>
+        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="chat/[id]/index" options={{ headerShown: true }} />
+        <Stack.Screen name="chat/[id]/info" options={{ headerShown: true }} />
+        <Stack.Screen name="contact/[id]" options={{ headerShown: true }} />
+        <Stack.Screen name="new-chat" options={{ presentation: 'modal' }} />
+        <Stack.Screen
+          name="attach"
+          options={{
+            presentation: 'formSheet',
+            sheetAllowedDetents: [0.55, 0.92],
+            sheetGrabberVisible: true,
+            sheetCornerRadius: 28,
+          }}
+        />
+        <Stack.Screen
+          name="call/[id]"
+          options={{ presentation: 'fullScreenModal', gestureEnabled: false, animation: 'fade' }}
+        />
+        <Stack.Screen
+          name="incoming-call"
+          options={{ presentation: 'fullScreenModal', gestureEnabled: false, animation: 'fade' }}
+        />
+        <Stack.Screen
+          name="media/[id]"
+          options={{
+            presentation: 'transparentModal',
+            animation: 'fade',
+            contentStyle: { backgroundColor: 'transparent' },
+          }}
+        />
+      </Stack.Protected>
+    </Stack>
+  );
+}
+
 export default function RootLayout() {
-  const hydrated = usePreferencesHydrated();
+  const hydrated = useHydrated();
+  const [splashDone, setSplashDone] = useState(false);
+  const finishSplash = useCallback(() => setSplashDone(true), []);
 
   useEffect(() => {
     if (hydrated) SplashScreen.hide();
@@ -29,9 +102,16 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ThemeProvider>
-        <Stack screenOptions={{ headerShown: false, animation: 'default' }} />
-      </ThemeProvider>
+      <KeyboardProvider>
+        <ThemeProvider>
+          <ToastProvider>
+            <DialogProvider>
+              <RootStack />
+            </DialogProvider>
+          </ToastProvider>
+          {!splashDone && <AnimatedSplash onDone={finishSplash} />}
+        </ThemeProvider>
+      </KeyboardProvider>
     </GestureHandlerRootView>
   );
 }

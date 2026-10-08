@@ -57,6 +57,10 @@ and several RN libraries still assume a flat `node_modules`.
 - **Networking:** `src/lib/api.ts` is the only HTTP entry point. It applies timeouts,
   validates every response with a Zod schema from `@koode/shared` and normalises
   failures into `ApiClientError` with a stable `code`.
+- **Animated views and styling:** never put `className` on Reanimated's
+  `Animated.View`. NativeWind drops its static styles once an animated style is
+  attached. Use `MotionView` / `MotionPressable` from `components/ui/MotionView`,
+  which take the animated style in a separate `animatedStyle` prop.
 - **Native code:** Continuous Native Generation. `ios/` and `android/` are generated
   by `expo prebuild` and are never committed. Native behaviour comes from config
   plugins. LiveKit, CallKit and PushKit need a **development build**; Expo Go cannot
@@ -242,3 +246,7 @@ Planned:
 3. **VoIP on iOS:** needs a paid developer account, a real device (the Simulator has
    no PushKit) and correct CallKit handling.
 4. **APNs from Workers:** HTTP/2 reachability is unverified (see Notifications).
+5. **iOS 27 scene life cycle:** Expo SDK 57's template doesn't adopt UIScene, which
+   iOS 27 requires. A local config plugin (`plugins/withSceneLifecycle.js`) adopts it
+   using Expo's own `ExpoAppSceneDelegate`. It is verified on the iOS 27 Simulator.
+   Remove it when upgrading to Expo SDK 58.

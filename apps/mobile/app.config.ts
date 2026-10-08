@@ -64,6 +64,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-secure-store',
     'expo-sqlite',
     'expo-image',
+    // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
+    './plugins/withSceneLifecycle',
+    // Dev builds reopen the last Metro server instead of showing the launcher.
+    ['expo-dev-client', { launchMode: 'most-recent' }],
   ],
   experiments: {
     typedRoutes: true,

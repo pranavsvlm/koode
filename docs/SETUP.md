@@ -7,8 +7,8 @@
 | macOS     | Apple Silicon |                                                                 |
 | Node.js   | 22 or newer   | 24 LTS recommended                                              |
 | pnpm      | 11.x          | `corepack enable` picks up the version pinned in `package.json` |
-| Xcode     | 27 or newer   | Includes the iOS Simulator                                      |
-| CocoaPods | latest        | Only if `expo run:ios` asks for it: `brew install cocoapods`    |
+| Xcode     | 27 or newer   | Simulator runtimes are a separate download (below)              |
+| CocoaPods | latest        | Required for iOS builds: `brew install cocoapods`               |
 
 ### One-time Xcode setup
 
@@ -20,12 +20,22 @@ sudo xcodebuild -license accept
 xcodebuild -runFirstLaunch
 ```
 
-Then open Xcode → Settings → Components and install an iOS Simulator runtime if none
-is listed. To check:
+Xcode 27 does not include a Simulator runtime. Download one (about 8 GB) from the
+command line, or in Xcode → Settings → Components:
 
 ```sh
-xcrun simctl list devices available | grep iPhone
+xcodebuild -downloadPlatform iOS -architectureVariant arm64   # latest (iOS 27)
+xcrun simctl list runtimes                                    # confirm it is installed
 ```
+
+Xcode 27 has no `Simulator.app`; it was replaced by **Device Hub**. Open it with
+`open -b com.apple.dt.Devices`.
+
+> **iOS 27 note.** iOS 27 terminates apps that don't use the UIScene life cycle.
+> Expo SDK 57's native template doesn't, so the app includes a small config plugin,
+> `apps/mobile/plugins/withSceneLifecycle.js`, that switches it to Expo's own
+> `ExpoAppSceneDelegate`. Expo SDK 58 does this itself; remove the plugin when
+> upgrading.
 
 ## 1. Install dependencies
 
@@ -63,8 +73,27 @@ pnpm ios
 Later sessions only need `pnpm dev:mobile`, unless you add a native dependency; then
 run `pnpm ios` again.
 
-The foundation screen shows a server status row. Green means the app reached
-`/health`. Tap the row to check again.
+This build uses sample data and has no real sign-in yet. Go through onboarding with
+any 12-character invite code, or choose "I already have an account" and enter any
+24 characters. **Settings → Developer** shows whether the app can reach your local
+server, and has switches for slow loading, empty data, simulated replies and
+simulated incoming calls.
+
+### Reviewing every screen without tapping
+
+On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep
+links can't drive automated checks. Instead, the development build has a screen
+tour:
+
+```sh
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=light npx expo start --dev-client   # or =dark, or =1 to keep your theme
+```
+
+Relaunch the app. It signs out, walks through every screen roughly every 3.5 seconds,
+and logs `[tour] <n> <screen>` in Metro so each step can be screenshotted with
+`xcrun simctl io booted screenshot`. Your appearance settings are restored at the
+end. Restart Metro without the variable to stop the tour.
 
 ### On your iPhone
 
@@ -158,3 +187,12 @@ pnpm --filter @koode/server cf-typegen
   script, add it to `allowBuilds` in `pnpm-workspace.yaml`.
 - **`xcrun: unable to find utility "simctl"`:** `xcode-select` points at the Command
   Line Tools instead of Xcode. Run the one-time Xcode setup above.
+- **App quits at launch with `UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`
+  in the crash report:** the native project was generated without the scene life
+  cycle plugin. Run `npx expo prebuild --platform ios --clean` from `apps/mobile`,
+  then `pod install` in `ios/` and rebuild.
+- **"Open in Koode Dev?" keeps appearing:** iOS 27 asks for confirmation on every URL
+  sent with `simctl openurl`, even when the app is open. Tap Open, or use the screen
+  tour above.
+- **Fast Refresh stops updating after a syntax error:** fix the error, then relaunch
+  the app. The dev client reopens the last Metro server automatically.

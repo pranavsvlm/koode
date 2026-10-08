@@ -8,3 +8,11 @@ jest.mock('expo-sqlite/kv-store', () => {
   };
   return { __esModule: true, default: storage, Storage: storage };
 });
+
+// Reanimated 4 runs on react-native-worklets; use the official mocks in Jest.
+// jest.mock factories are hoisted, so they must use require().
+/* eslint-disable @typescript-eslint/no-require-imports */
+jest.mock('react-native-worklets', () => require('react-native-worklets/src/mock'));
+jest.mock('react-native-keyboard-controller', () =>
+  require('react-native-keyboard-controller/jest'),
+);

@@ -1,8 +1,11 @@
 import {
+  accents,
   colorTokens,
   cssVariablesFor,
   hexToRgbChannels,
   palette,
+  resolvePalette,
+  type AccentName,
   type ColorToken,
 } from '../tokens';
 
@@ -46,15 +49,22 @@ describe('palette', () => {
     ['text-secondary', 'background', 4.5],
     ['text-secondary', 'surface', 4.5],
     ['text-tertiary', 'background', 3],
+    ['text', 'fill', 7],
+    ['text-secondary', 'fill', 3],
     ['accent', 'background', 3],
     ['accent-foreground', 'accent', 4.5],
     ['bubble-outgoing-text', 'bubble-outgoing', 4.5],
     ['bubble-incoming-text', 'bubble-incoming', 7],
   ];
 
-  it.each(['light', 'dark'] as const)('meets contrast targets in %s mode', (scheme) => {
+  const cases = (['light', 'dark'] as const).flatMap((scheme) =>
+    (Object.keys(accents) as AccentName[]).map((accent) => [scheme, accent] as const),
+  );
+
+  it.each(cases)('meets contrast targets in %s mode with the %s accent', (scheme, accent) => {
+    const p = resolvePalette(scheme, accent);
     for (const [fg, bg, min] of pairs) {
-      const ratio = contrast(palette[scheme][fg], palette[scheme][bg]);
+      const ratio = contrast(p[fg], p[bg]);
       expect({ pair: `${fg} on ${bg}`, ok: ratio >= min, ratio: Number(ratio.toFixed(2)) }).toEqual(
         expect.objectContaining({ ok: true }),
       );

@@ -9,16 +9,16 @@ import { colorScheme as nativewindColorScheme, vars } from 'nativewind';
 import { createContext, useContext, useEffect, useMemo, type ReactNode } from 'react';
 import { StyleSheet, useColorScheme, View } from 'react-native';
 import { usePreferences } from '@/stores/preferences';
-import { cssVariablesFor, palette, type ColorScheme } from './tokens';
+import {
+  cssVariablesFor,
+  resolvePalette,
+  type AccentName,
+  type ColorScheme,
+  type Palette,
+} from './tokens';
 
-const themeVariables = {
-  light: vars(cssVariablesFor('light')),
-  dark: vars(cssVariablesFor('dark')),
-};
-
-function navigationTheme(scheme: ColorScheme): Theme {
+function navigationTheme(scheme: ColorScheme, p: Palette): Theme {
   const base = scheme === 'dark' ? DarkTheme : DefaultTheme;
-  const p = palette[scheme];
   return {
     ...base,
     colors: {
@@ -33,13 +33,23 @@ function navigationTheme(scheme: ColorScheme): Theme {
   };
 }
 
-const ColorSchemeContext = createContext<ColorScheme>('light');
+type ThemeValue = { scheme: ColorScheme; accent: AccentName; colors: Palette };
+
+const ThemeContext = createContext<ThemeValue>({
+  scheme: 'light',
+  accent: 'blue',
+  colors: resolvePalette('light'),
+});
 
 /** The resolved (never "system") colour scheme currently applied. */
-export const useAppColorScheme = () => useContext(ColorSchemeContext);
+export const useAppColorScheme = () => useContext(ThemeContext).scheme;
+
+/** Resolved hex colours, for props that cannot take a className (icons, gradients). */
+export const useThemeColors = () => useContext(ThemeContext).colors;
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const preference = usePreferences((s) => s.appearance);
+  const accent = usePreferences((s) => s.accent);
   const system = useColorScheme();
   const scheme: ColorScheme =
     preference === 'system' ? (system === 'dark' ? 'dark' : 'light') : preference;
@@ -49,17 +59,22 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     nativewindColorScheme.set(preference);
   }, [preference]);
 
-  const navTheme = useMemo(() => navigationTheme(scheme), [scheme]);
+  const value = useMemo<ThemeValue>(
+    () => ({ scheme, accent, colors: resolvePalette(scheme, accent) }),
+    [scheme, accent],
+  );
+  const variables = useMemo(() => vars(cssVariablesFor(scheme, accent)), [scheme, accent]);
+  const navTheme = useMemo(() => navigationTheme(scheme, value.colors), [scheme, value.colors]);
 
   return (
-    <ColorSchemeContext.Provider value={scheme}>
+    <ThemeContext.Provider value={value}>
       <NavigationThemeProvider value={navTheme}>
-        <View style={[styles.fill, themeVariables[scheme]]}>
+        <View style={[styles.fill, variables]}>
           <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
           {children}
         </View>
       </NavigationThemeProvider>
-    </ColorSchemeContext.Provider>
+    </ThemeContext.Provider>
   );
 }
 

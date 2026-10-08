@@ -13,3 +13,7 @@
 - Run `pnpm check` before declaring work done.
 - Use semantic colour tokens (`bg-surface`, `text-text-secondary`), never raw hex in
   components.
+- Never use `className` on Reanimated's `Animated.View`; use `MotionView` /
+  `MotionPressable` (components/ui/MotionView) with `animatedStyle`.
+- Review UI on the Simulator with the dev screen tour (`EXPO_PUBLIC_DEV_TOUR`, see
+  docs/SETUP.md). Type checks alone don't catch NativeWind styling failures.
