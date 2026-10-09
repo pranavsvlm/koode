@@ -1,5 +1,6 @@
 import * as Crypto from 'expo-crypto';
 import { router, type Href } from 'expo-router';
+import { File, Paths } from 'expo-file-system';
 import * as Notifications from 'expo-notifications';
 import { setLogLevel } from 'livekit-client';
 import { KoodeCalls } from '../../modules/koode-calls';
@@ -9,6 +10,18 @@ import { callController } from '@/features/calls';
 import { startCall } from '@/features/calls/startCall';
 import { handleResponse, syncPushRegistration } from '@/features/notifications';
 import { ACTION } from '@/features/notifications/policy';
+import { download } from '@/features/media/files';
+import {
+  prepareDocument,
+  prepareImage,
+  prepareVideo,
+  prepareVoice,
+  type UploadDraft,
+} from '@/features/media/process';
+import { remoteOf } from '@/features/media/useMedia';
+import { saveToPhotos } from '@/features/media/actions';
+import { devHandles } from './handles';
+import { ME } from '@/domain/types';
 import { useChat } from '@/stores/chat';
 import { usePreferences, type AppearancePreference } from '@/stores/preferences';
 import { generateRecoveryKey } from '@/features/auth/validation';
@@ -389,6 +402,209 @@ export const PUSH_TOUR: Step[] = [
   { name: 'done', run: go('/chats') },
 ];
 
+/**
+ * Media and group check against the real server (scripts/media-peer.mjs plays
+ * "Maya" and "Sam"). The runner copies test files into Documents/e2e/; they go
+ * through the same processing, upload and send path as picked files.
+ */
+const mediaLog = (label: string, value?: unknown) =>
+  console.log(`[tour-media] ${label}${value === undefined ? '' : ` ${JSON.stringify(value)}`}`);
+const e2eFile = (name: string) => new File(Paths.document, 'e2e', name).uri;
+/** The person named `name` this (fresh) account has a direct chat with. */
+const contactNamed = (name: string) => {
+  const { contacts, conversations } = useChat.getState();
+  for (const c of Object.values(conversations)) {
+    if (c.kind !== 'direct') continue;
+    const other = c.memberIds.find((m) => m !== ME);
+    if (other && contacts[other]?.displayName === name) return other;
+  }
+  return '';
+};
+const directWith = (userId: string) =>
+  Object.values(useChat.getState().conversations).find(
+    (c) => c.kind === 'direct' && c.memberIds.includes(userId),
+  )?.id ?? '';
+const messagesIn = (id: string) => useChat.getState().messages[id] ?? [];
+const fromMaya = (kind: string) =>
+  messagesIn(directWith(contactNamed('Maya Chen'))).find(
+    (m) => m.senderId !== ME && m.attachment?.kind === kind,
+  );
+let groupId = '';
+const step = (name: string, run: () => Promise<unknown>) => ({
+  name,
+  run: () =>
+    void run().catch((e: unknown) =>
+      mediaLog(`${name} FAILED`, e instanceof Error ? e.message : String(e)),
+    ),
+});
+const sendFile = (make: () => Promise<UploadDraft>) => async () => {
+  const chat = directWith(contactNamed('Maya Chen'));
+  useChat.getState().send(chat, { upload: await make() });
+};
+
+export const MEDIA_TOUR: Step[] = [
+  {
+    name: 'register',
+    run: () => {
+      useDevSettings.getState().set({ sampleData: false });
+      signIn();
+    },
+  },
+  { name: 'wait-for-peer', run: () => mediaLog('ready') },
+  { name: 'wait-for-files', run: () => {} },
+  step('open-chat', async () => {
+    const st = useChat.getState();
+    const chat = directWith(contactNamed('Maya Chen'));
+    mediaLog('state', {
+      contacts: Object.values(st.contacts).map((c) => c.displayName),
+      conversations: Object.values(st.conversations).map((c) => [c.kind, c.memberIds.length]),
+      chat,
+    });
+    if (chat) router.navigate(`/chat/${chat}`);
+  }),
+  step('received', async () => {
+    const got: unknown[] = [];
+    for (const kind of ['image', 'video', 'document', 'voice']) {
+      const a = fromMaya(kind)?.attachment;
+      const remote = remoteOf(a);
+      if (!a || !remote) {
+        got.push([kind, 'MISSING']);
+        continue;
+      }
+      const uri = await download(remote);
+      got.push([kind, new File(uri).size, 'sizeBytes' in a ? a.sizeBytes : null]);
+    }
+    mediaLog('downloaded', got);
+  }),
+  step(
+    'send-photo',
+    sendFile(() => prepareImage({ uri: e2eFile('gps.jpg'), width: 1600, height: 1200 })),
+  ),
+  step(
+    'send-video',
+    sendFile(() =>
+      prepareVideo({
+        uri: e2eFile('clip.mp4'),
+        width: 640,
+        height: 360,
+        durationMs: 3000,
+        fileName: 'clip.mp4',
+      }),
+    ),
+  ),
+  step(
+    'send-document',
+    sendFile(() =>
+      prepareDocument({
+        uri: e2eFile('notes.pdf'),
+        name: 'Trip notes.pdf',
+        mimeType: 'application/pdf',
+      }),
+    ),
+  ),
+  step(
+    'send-voice',
+    sendFile(() =>
+      prepareVoice({
+        uri: e2eFile('voice.m4a'),
+        durationMs: 2000,
+        levels: [0.1, 0.5, 0.9, 0.4, 0.2],
+      }),
+    ),
+  ),
+  step('sent', async () => {
+    const mine = messagesIn(directWith(contactNamed('Maya Chen'))).filter((m) => m.senderId === ME);
+    mediaLog(
+      'sent',
+      mine.map((m) => [m.attachment?.kind, m.status, !!m.attachment?.attachmentId]),
+    );
+  }),
+  step('react', async () => {
+    const photo = fromMaya('image')!;
+    await useChat.getState().toggleReaction(photo.conversationId, photo.id, '👍');
+    mediaLog('reacted');
+  }),
+  step('delete-for-everyone', async () => {
+    const chat = directWith(contactNamed('Maya Chen'));
+    const doc = messagesIn(chat).find(
+      (m) => m.senderId === ME && m.attachment?.kind === 'document',
+    );
+    if (doc) await useChat.getState().deleteMessage(chat, doc.id, 'everyone');
+    const after = messagesIn(chat).find((m) => m.id === doc?.id);
+    mediaLog('deleted', { deleted: after?.deleted, attachment: !!after?.attachment });
+  }),
+  step('reaction-from-maya', async () => {
+    const mine = messagesIn(directWith(contactNamed('Maya Chen'))).find(
+      (m) => m.senderId === ME && m.attachment?.kind === 'image',
+    );
+    mediaLog('my-photo-reactions', mine?.reactions);
+  }),
+  step('record-voice', async () => {
+    await devHandles.composer?.startRecording();
+    mediaLog('recording', !!devHandles.composer);
+  }),
+  step('send-recording', async () => {
+    await devHandles.composer?.sendRecording();
+    mediaLog('recorded');
+  }),
+  step('save-photo', async () => {
+    const photo = fromMaya('image')!;
+    await saveToPhotos(photo.attachment!);
+    mediaLog('saved-to-photos');
+  }),
+  step('viewer-photo', async () => {
+    const photo = fromMaya('image')!;
+    router.push({
+      pathname: '/media/[id]',
+      params: { id: photo.id, conversationId: photo.conversationId },
+    });
+  }),
+  step('viewer-video', async () => {
+    const video = fromMaya('video')!;
+    router.back();
+    setTimeout(
+      () =>
+        router.push({
+          pathname: '/media/[id]',
+          params: { id: video.id, conversationId: video.conversationId },
+        }),
+      400,
+    );
+  }),
+  step('group-create', async () => {
+    router.back();
+    groupId = await useChat.getState().createConversation([contactNamed('Maya Chen')], 'Family');
+    setTimeout(() => router.navigate(`/chat/${groupId}`), 400);
+  }),
+  step('group-add-sam', async () => {
+    await useChat.getState().addMembers(groupId, [contactNamed('Sam Lee')]);
+    await useChat.getState().setAdmin(groupId, contactNamed('Sam Lee'), true);
+  }),
+  step('group-rename', async () => {
+    await useChat.getState().renameGroup(groupId, 'Cousins');
+  }),
+  step('group-remove-maya', async () => {
+    await useChat.getState().removeMember(groupId, contactNamed('Maya Chen'));
+    mediaLog('group-done', groupId);
+  }),
+  step('group-info', async () => {
+    router.push(`/chat/${groupId}/info`);
+  }),
+  step('group-chat', async () => {
+    router.back();
+    const c = useChat.getState().conversations[groupId];
+    mediaLog('group', {
+      title: c?.title,
+      members: c?.memberIds.length,
+      admins: c?.adminIds.length,
+      notes: messagesIn(groupId)
+        .filter((m) => m.system)
+        .map((m) => m.system),
+    });
+  }),
+  { name: 'done', run: () => mediaLog('done') },
+];
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
@@ -415,7 +631,9 @@ export function useDevTour(mode: string | undefined) {
           ? CALL_TOUR
           : mode === 'push'
             ? PUSH_TOUR
-            : TOUR;
+            : mode === 'media'
+              ? MEDIA_TOUR
+              : TOUR;
     let i = 0;
     const tick = () => {
       const step = steps[i];

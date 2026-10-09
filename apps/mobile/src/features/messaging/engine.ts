@@ -1,7 +1,9 @@
 import {
   ServerEvent,
+  type AttachmentMeta,
   type Call,
   type ConversationSummary,
+  type CreateAttachmentRequest,
   type CreateConversationRequest,
   type Message,
   type MessagePage,
@@ -9,7 +11,13 @@ import {
   type ReceiptRequest,
 } from '@koode/shared';
 import { ApiClientError } from '@/lib/api';
-import type { LocalMessage, MessagingStore, Snapshot } from './types';
+import {
+  normalizeMessage,
+  type LocalMessage,
+  type LocalUpload,
+  type MessagingStore,
+  type Snapshot,
+} from './types';
 
 /** Server API surface the engine needs (authenticated). */
 export type MessagingApi = {
@@ -19,14 +27,35 @@ export type MessagingApi = {
   conversation: (id: string) => Promise<ConversationSummary>;
   messages: (
     id: string,
-    cursor: { before?: number; after?: number; limit?: number },
+    cursor: { before?: number; after?: number; changedSince?: number; limit?: number },
   ) => Promise<MessagePage>;
   send: (
     id: string,
-    body: { id: string; body: string; replyToId?: string | null },
+    body: { id: string; body: string; replyToId?: string | null; attachmentId?: string | null },
   ) => Promise<Message>;
   receipts: (id: string, body: ReceiptRequest) => Promise<unknown>;
   createConversation: (body: CreateConversationRequest) => Promise<ConversationSummary>;
+  createAttachment: (
+    conversationId: string,
+    body: CreateAttachmentRequest,
+  ) => Promise<AttachmentMeta>;
+  /** PUT a local file as the attachment's content or (video) poster. */
+  upload: (
+    attachmentId: string,
+    part: 'content' | 'thumbnail',
+    file: { uri: string; mimeType: string },
+    onProgress: (fraction: number) => void,
+  ) => Promise<void>;
+  react: (conversationId: string, messageId: string, emoji: string | null) => Promise<Message>;
+  deleteMessage: (conversationId: string, messageId: string) => Promise<Message>;
+  renameGroup: (conversationId: string, title: string) => Promise<ConversationSummary>;
+  addMembers: (conversationId: string, userIds: string[]) => Promise<ConversationSummary>;
+  setRole: (
+    conversationId: string,
+    userId: string,
+    role: 'member' | 'admin',
+  ) => Promise<ConversationSummary>;
+  removeMember: (conversationId: string, userId: string) => Promise<unknown>;
 };
 
 /** Minimal socket surface (React Native WebSocket in the app, a fake in tests). */
@@ -50,6 +79,10 @@ export type EngineDeps = {
   onSignedOut?: () => void;
   /** Call signalling arrives on the same socket; the call controller handles it. */
   onCall?: (call: Call) => void;
+  /** A file was sent: the app may keep it as the cached copy of the attachment. */
+  onUploaded?: (upload: LocalUpload, attachment: AttachmentMeta) => void;
+  /** A pending upload was cancelled or failed for good: its outbox files can go. */
+  onDiscarded?: (upload: LocalUpload) => void;
   isSignedOutError?: (e: unknown) => boolean;
   now?: () => number;
   random?: () => number;
@@ -65,7 +98,7 @@ export const TYPING_TTL_MS = 5_000;
 export const TYPING_THROTTLE_MS = 3_000;
 export const RECEIPT_DEBOUNCE_MS = 400;
 const MAX_BACKOFF_MS = 30_000;
-const SYNC_PAGES_PER_CONVERSATION = 5;
+const SYNC_PAGES_PER_CONVERSATION = 10;
 const PAGE = 50;
 const PING = JSON.stringify({ type: 'ping' });
 
@@ -101,8 +134,10 @@ function describeError(e: unknown): string {
  * receipts and throttled typing. Framework-agnostic; React subscribes.
  */
 export class MessagingEngine {
-  private deps: Required<Omit<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall'>> &
-    Pick<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall'>;
+  private deps: Required<
+    Omit<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall' | 'onUploaded' | 'onDiscarded'>
+  > &
+    Pick<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall' | 'onUploaded' | 'onDiscarded'>;
   private snapshot: Snapshot = {
     connection: 'offline',
     conversations: [],
@@ -110,6 +145,7 @@ export class MessagingEngine {
     users: {},
     typing: {},
     hasMore: {},
+    progress: {},
   };
   private listeners = new Set<() => void>();
   private socket: SocketLike | null = null;
@@ -175,7 +211,10 @@ export class MessagingEngine {
       return { conversations: [], messages: [], users: [] };
     });
     const messages: Record<string, LocalMessage[]> = {};
-    for (const m of cached.messages) (messages[m.conversationId] ??= []).push(m);
+    for (const raw of cached.messages) {
+      const m = normalizeMessage(raw);
+      (messages[m.conversationId] ??= []).push(m);
+    }
     for (const list of Object.values(messages)) list.sort(bySeq);
     this.emit({
       conversations: sortConversations(cached.conversations),
@@ -206,7 +245,14 @@ export class MessagingEngine {
   async reset(): Promise<void> {
     this.stop();
     await this.cache((st) => st.clear());
-    this.emit({ conversations: [], messages: {}, users: {}, typing: {}, hasMore: {} });
+    this.emit({
+      conversations: [],
+      messages: {},
+      users: {},
+      typing: {},
+      hasMore: {},
+      progress: {},
+    });
   }
 
   /** App returned to the foreground or the network came back. */
@@ -368,27 +414,47 @@ export class MessagingEngine {
       const summary = await this.deps.api.conversation(id);
       await this.upsertConversation(summary);
       await this.catchUp(summary);
-    } catch {
-      // try again on next sync
+    } catch (e) {
+      // Left or removed from a group: it's no longer ours to show.
+      if (e instanceof ApiClientError && e.code === 'not_found') await this.forgetConversation(id);
+      // otherwise: try again on next sync
     }
   }
 
+  private async forgetConversation(id: string) {
+    await this.cache((st) => st.removeConversation(id));
+    const { [id]: _gone, ...messages } = this.snapshot.messages;
+    this.emit({
+      conversations: this.snapshot.conversations.filter((c) => c.id !== id),
+      messages,
+    });
+  }
+
+  /**
+   * Bring a conversation up to date: new messages *and* changes to ones we
+   * have (reactions, deletions), by revision. Changes to older messages that
+   * aren't loaded are skipped; they arrive current when scrolled to.
+   */
   private async catchUp(c: ConversationSummary) {
-    const local = this.snapshot.messages[c.id] ?? [];
-    const maxSeq = local.reduce((m, x) => Math.max(m, x.seq ?? 0), 0);
-    if (c.lastSeq <= maxSeq) return;
+    const local = (this.snapshot.messages[c.id] ?? []).filter((m) => m.seq !== null);
     try {
-      if (maxSeq === 0) {
+      if (local.length === 0) {
+        if (c.lastSeq === 0) return;
         // New to this device: fetch the newest page; older history loads on scroll.
         const page = await this.deps.api.messages(c.id, { limit: PAGE });
         this.ingest(page.messages.map(fromServer));
         this.emit({ hasMore: { ...this.snapshot.hasMore, [c.id]: page.hasMore } });
       } else {
-        let after = maxSeq;
+        let since = local.reduce((m, x) => Math.max(m, x.rev ?? 0), 0);
+        if (c.lastRev <= since) return;
+        const known = new Set(local.map((m) => m.id));
+        const oldest = local.reduce((m, x) => Math.min(m, x.seq!), Number.MAX_SAFE_INTEGER);
         for (let i = 0; i < SYNC_PAGES_PER_CONVERSATION; i++) {
-          const page = await this.deps.api.messages(c.id, { after, limit: PAGE });
-          this.ingest(page.messages.map(fromServer));
-          after = page.messages.at(-1)?.seq ?? after;
+          const page = await this.deps.api.messages(c.id, { changedSince: since, limit: PAGE });
+          this.ingest(
+            page.messages.filter((m) => known.has(m.id) || m.seq >= oldest).map(fromServer),
+          );
+          since = page.messages.at(-1)?.rev ?? since;
           if (!page.hasMore) break;
         }
       }
@@ -398,7 +464,7 @@ export class MessagingEngine {
       const top = received.reduce((m, x) => Math.max(m, x.seq ?? 0), 0);
       if (top > 0) this.queueAck(c.id, { delivered: top });
     } catch {
-      // partial catch-up is fine; the next sync continues from the new max
+      // partial catch-up is fine; the next sync continues from the new revision
     }
   }
 
@@ -451,8 +517,11 @@ export class MessagingEngine {
       ...c,
       lastSeq: Math.max(c.lastSeq, m.seq),
       lastMessage: !c.lastMessage || m.seq >= c.lastMessage.seq ? m : c.lastMessage,
+      lastRev: Math.max(c.lastRev ?? 0, m.rev),
       unreadCount:
-        m.senderId === this.deps.me ? c.unreadCount : c.unreadCount + (m.seq > c.lastSeq ? 1 : 0),
+        m.senderId === this.deps.me || m.kind === 'system'
+          ? c.unreadCount
+          : c.unreadCount + (m.seq > c.lastSeq ? 1 : 0),
     }));
   }
 
@@ -465,7 +534,9 @@ export class MessagingEngine {
       const list = messages[m.conversationId] ?? [];
       const i = list.findIndex((x) => x.id === m.id);
       if (i >= 0) {
-        if (list[i]!.state === 'sent' && m.state !== 'sent') continue; // never downgrade
+        const current = list[i]!;
+        if (current.state === 'sent' && m.state !== 'sent') continue; // never downgrade
+        if (current.rev !== null && m.rev !== null && m.rev < current.rev) continue; // stale copy
         const next = [...list];
         next[i] = m;
         messages[m.conversationId] = next;
@@ -557,17 +628,24 @@ export class MessagingEngine {
   // ——— Sending ———
 
   /** Queue a message; it is shown immediately and delivered when possible. */
-  send(conversationId: string, body: string, replyToId: string | null = null): LocalMessage {
-    const message: LocalMessage = {
+  send(
+    conversationId: string,
+    body: string,
+    replyToId: string | null = null,
+    upload?: Omit<LocalUpload, 'attachmentId' | 'posterUploaded' | 'uploaded'>,
+  ): LocalMessage {
+    const message: LocalMessage = normalizeMessage({
       id: this.deps.uuid(),
       conversationId,
       seq: null,
       senderId: this.deps.me,
+      kind: upload ? 'attachment' : 'text',
       body: body.trim(),
       replyToId,
       createdAt: this.deps.now(),
       state: 'pending',
-    };
+      upload: upload && { ...upload, attachmentId: null, posterUploaded: false, uploaded: false },
+    });
     this.ingest([message]);
     this.lastTypingSent.delete(conversationId);
     void this.flushOutbox();
@@ -609,22 +687,139 @@ export class MessagingEngine {
           .sort((a, b) => a.createdAt - b.createdAt)[0];
         if (!next) break;
         try {
+          const upload = next.upload ? await this.uploadFor(next) : null;
           const saved = await this.deps.api.send(next.conversationId, {
             id: next.id,
             body: next.body,
             replyToId: next.replyToId,
+            attachmentId: upload?.attachmentId ?? null,
           });
           this.ingest([fromServer(saved)]);
           this.bumpConversation(saved);
+          this.setProgress(next.id, null);
+          if (upload && saved.attachment) this.deps.onUploaded?.(upload, saved.attachment);
         } catch (e) {
           if (isTransient(e)) {
             this.flushAgain = false;
             return; // stays pending; retried on reconnect/resume
           }
-          this.ingest([{ ...next, state: 'failed' }]);
+          this.setProgress(next.id, null);
+          this.ingest([{ ...this.current(next), state: 'failed' }]);
         }
       }
     }
+  }
+
+  private current(m: LocalMessage): LocalMessage {
+    return (this.snapshot.messages[m.conversationId] ?? []).find((x) => x.id === m.id) ?? m;
+  }
+
+  private setProgress(messageId: string, fraction: number | null) {
+    const { [messageId]: _old, ...rest } = this.snapshot.progress;
+    this.emit({ progress: fraction === null ? rest : { ...rest, [messageId]: fraction } });
+  }
+
+  /** Remember an upload step on the pending message (persisted, so retries resume). */
+  private saveUpload(m: LocalMessage, upload: LocalUpload) {
+    this.ingest([{ ...this.current(m), upload }]);
+  }
+
+  /**
+   * Create → (poster) → content, skipping steps already done. An expired
+   * upload (unsent for a day; the server cleans those up) starts again.
+   */
+  private async uploadFor(m: LocalMessage): Promise<LocalUpload> {
+    let upload = this.current(m).upload!;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        if (!upload.attachmentId) {
+          const meta = await this.deps.api.createAttachment(m.conversationId, upload.request);
+          upload = { ...upload, attachmentId: meta.id, posterUploaded: false, uploaded: false };
+          this.saveUpload(m, upload);
+        }
+        if (upload.posterUri && !upload.posterUploaded) {
+          await this.deps.api.upload(
+            upload.attachmentId!,
+            'thumbnail',
+            { uri: upload.posterUri, mimeType: 'image/jpeg' },
+            () => {},
+          );
+          upload = { ...upload, posterUploaded: true };
+          this.saveUpload(m, upload);
+        }
+        if (!upload.uploaded) {
+          this.setProgress(m.id, 0);
+          await this.deps.api.upload(
+            upload.attachmentId!,
+            'content',
+            { uri: upload.uri, mimeType: upload.request.mimeType },
+            (f) => this.setProgress(m.id, f),
+          );
+          upload = { ...upload, uploaded: true };
+          this.saveUpload(m, upload);
+        }
+        return upload;
+      } catch (e) {
+        const expired = e instanceof ApiClientError && e.code === 'not_found';
+        if (!expired || attempt > 0) throw e;
+        upload = { ...upload, attachmentId: null, posterUploaded: false, uploaded: false };
+      }
+    }
+  }
+
+  /** Remove a message that was never sent (or failed) from this device. */
+  discard(messageId: string): void {
+    const m = Object.values(this.snapshot.messages)
+      .flat()
+      .find((x) => x.id === messageId);
+    if (!m || m.state === 'sent') return;
+    const messages = {
+      ...this.snapshot.messages,
+      [m.conversationId]: (this.snapshot.messages[m.conversationId] ?? []).filter(
+        (x) => x.id !== messageId,
+      ),
+    };
+    void this.cache((st) => st.deleteMessages([messageId]));
+    this.emit({ messages });
+    this.setProgress(messageId, null);
+    if (m.upload) this.deps.onDiscarded?.(m.upload);
+  }
+
+  // ——— Reactions and deletion (online only) ———
+
+  /** Set or (null) remove my reaction; shown at once, reverted if the server refuses. */
+  async react(conversationId: string, messageId: string, emoji: string | null): Promise<void> {
+    const before = (this.snapshot.messages[conversationId] ?? []).find((m) => m.id === messageId);
+    if (!before || before.seq === null) return;
+    const others = before.reactions.filter((r) => r.userId !== this.deps.me);
+    this.replaceLocal({
+      ...before,
+      reactions: emoji ? [...others, { userId: this.deps.me, emoji }] : others,
+    });
+    try {
+      this.ingest([fromServer(await this.deps.api.react(conversationId, messageId, emoji))]);
+    } catch (e) {
+      this.replaceLocal(before);
+      throw e;
+    }
+  }
+
+  /** Delete for everyone (my message, or as a group admin). */
+  async deleteForEveryone(conversationId: string, messageId: string): Promise<void> {
+    const saved = await this.deps.api.deleteMessage(conversationId, messageId);
+    this.ingest([fromServer(saved)]);
+    this.bumpConversation(saved);
+  }
+
+  /** Optimistic local edit that ignores revision ordering (reverted on failure). */
+  private replaceLocal(m: LocalMessage) {
+    const list = this.snapshot.messages[m.conversationId] ?? [];
+    this.emit({
+      messages: {
+        ...this.snapshot.messages,
+        [m.conversationId]: list.map((x) => (x.id === m.id ? m : x)),
+      },
+    });
   }
 
   // ——— Receipts ———
@@ -690,6 +885,27 @@ export class MessagingEngine {
     const summary = await this.deps.api.createConversation(request);
     await this.upsertConversation(summary);
     return summary.id;
+  }
+
+  // Group administration: the server adds a system message, which arrives as
+  // a normal message event; the returned summary updates members at once.
+
+  async renameGroup(conversationId: string, title: string): Promise<void> {
+    await this.upsertConversation(await this.deps.api.renameGroup(conversationId, title));
+  }
+
+  async addMembers(conversationId: string, userIds: string[]): Promise<void> {
+    await this.upsertConversation(await this.deps.api.addMembers(conversationId, userIds));
+  }
+
+  async setRole(conversationId: string, userId: string, role: 'member' | 'admin'): Promise<void> {
+    await this.upsertConversation(await this.deps.api.setRole(conversationId, userId, role));
+  }
+
+  async removeMember(conversationId: string, userId: string): Promise<void> {
+    await this.deps.api.removeMember(conversationId, userId);
+    if (userId === this.deps.me) await this.forgetConversation(conversationId);
+    else await this.syncConversation(conversationId);
   }
 }
 

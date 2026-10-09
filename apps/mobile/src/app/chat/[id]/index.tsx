@@ -10,7 +10,12 @@ import { DayDivider } from '@/features/chat/DayDivider';
 import { buildChatItems, type ChatItem } from '@/features/chat/items';
 import { MessageActionsSheet } from '@/features/chat/MessageActionsSheet';
 import { MessageBubble } from '@/features/chat/MessageBubble';
+import { SystemNote } from '@/features/chat/SystemNote';
 import { TypingIndicator } from '@/features/chat/TypingIndicator';
+import { callController } from '@/features/calls';
+import { MediaActionError, saveToPhotos, shareFile } from '@/features/media/actions';
+import { MediaError, prepareVoice } from '@/features/media/process';
+import type { Recording } from '@/features/media/useVoiceRecorder';
 import { detailOptions } from '@/navigation/options';
 import { conversationTitle, directContactId, useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
@@ -63,19 +68,65 @@ export default function ConversationScreen() {
       router.push({ pathname: '/media/[id]', params: { id: m.id, conversationId: id } }),
     [id],
   );
+  const failed = useCallback(
+    (title: string) => (e: unknown) =>
+      toast.show({
+        title,
+        message: e instanceof MediaActionError ? e.message : 'Check your connection and try again.',
+        tone: 'error',
+      }),
+    [toast],
+  );
   const onReact = useCallback(
-    (m: Message, emoji: string) => toggleReaction(id, m.id, emoji),
-    [id, toggleReaction],
+    (m: Message, emoji: string) =>
+      void toggleReaction(id, m.id, emoji).catch(failed('Couldn’t react')),
+    [id, toggleReaction, failed],
   );
   const onOpenDocument = useCallback(
-    () => toast.show({ title: 'Downloads arrive with media support (Phase 7)' }),
-    [toast],
+    (m: Message) => {
+      if (!m.attachment) return;
+      toast.show({ title: 'Opening…' });
+      void shareFile(m.attachment).catch(failed('Couldn’t open the file'));
+    },
+    [toast, failed],
+  );
+  const onSave = useCallback(
+    (m: Message) =>
+      m.attachment &&
+      void saveToPhotos(m.attachment)
+        .then(() => toast.show({ title: 'Saved to Photos', tone: 'success' }))
+        .catch(failed('Couldn’t save')),
+    [toast, failed],
+  );
+  const onShare = useCallback(
+    (m: Message) => m.attachment && void shareFile(m.attachment).catch(failed('Couldn’t share')),
+    [failed],
+  );
+  const onDelete = useCallback(
+    (m: Message, scope: 'me' | 'everyone') =>
+      void deleteMessage(id, m.id, scope).catch(failed('Couldn’t delete')),
+    [id, deleteMessage, failed],
+  );
+  const sendVoice = useCallback(
+    async (recording: Recording) => {
+      try {
+        const upload = await prepareVoice(recording);
+        send(id, { upload, replyToId: replyTo?.id });
+        setReplyTo(undefined);
+      } catch (e) {
+        failed('Couldn’t send the recording')(
+          e instanceof MediaError ? new MediaActionError(e.message) : e,
+        );
+      }
+    },
+    [id, send, replyTo, failed],
   );
   const onRetry = useCallback((m: Message) => useChat.getState().retry(m.id), []);
 
   const renderItem = useCallback(
     ({ item }: { item: ChatItem }) => {
       if (item.type === 'day') return <DayDivider label={item.label} />;
+      if (item.type === 'system') return <SystemNote text={item.text} />;
       const m = item.message;
       const replyTarget = m.replyToId ? byId.get(m.replyToId) : undefined;
       return (
@@ -229,18 +280,30 @@ export default function ConversationScreen() {
           }}
           onTyping={() => useChat.getState().typing(id)}
           onAttach={() => router.push({ pathname: '/attach', params: { conversationId: id } })}
-          onVoice={() =>
-            toast.show({ title: 'Voice messages arrive with media support (Phase 7)' })
+          onVoice={(r) => void sendVoice(r)}
+          canRecord={() =>
+            callController.getSnapshot().phase === 'idle' ||
+            callController.getSnapshot().phase === 'ended'
+              ? null
+              : 'You can’t record a voice message during a call.'
           }
+          onError={(message) => toast.show({ title: message, tone: 'error' })}
         />
       </KeyboardAvoidingView>
 
       <MessageActionsSheet
         message={actionMessage}
+        canDeleteForEveryone={
+          !!actionMessage &&
+          (actionMessage.senderId === ME ||
+            (isGroup && conversation.adminIds.includes(ME) && useChat.getState().mode === 'live'))
+        }
         onClose={() => setActionMessage(null)}
         onReply={setReplyTo}
         onReact={onReact}
-        onDelete={(m) => deleteMessage(id, m.id)}
+        onDelete={onDelete}
+        onSave={onSave}
+        onShare={onShare}
       />
     </View>
   );

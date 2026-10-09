@@ -181,19 +181,110 @@ app ◄──WebSocket events──── UserSocket DO ◄───────
   - Reconnection with exponential backoff (1 s → 30 s, with jitter).
   - A 25 s heartbeat with a 10 s pong timeout catches silently dead connections, such
     as after a network switch. Foregrounding the app reconnects immediately.
-  - After reconnecting it catches up: the conversation list, then `after=<max seq>`
-    per chat.
+  - After reconnecting it catches up: the conversation list, then
+    `changedSince=<max revision>` per chat, which returns new messages _and_ edits
+    (reactions, deletions). See Media and groups.
   - History: the newest 50 messages for a new chat, then older pages on scroll.
   - Delivered and read receipts are batched (400 ms); typing sends are throttled (3 s),
     and incoming typing indicators expire after 5 s.
 - **Directory:** `GET /v1/users` lists every active member of the instance (it's
   invite-only), with public profile fields only.
-- **Not yet server-side (Phase 7):** reactions, deleting messages, pin and mute (kept
-  on the device), media, and group administration. Groups can already be created and
-  used for messaging.
+- **Device-only:** pin, mute and "delete for me".
 - **End-to-end encryption (Phase 8):** message bodies are plaintext in D1 and the cache
   today. Each message row carries an `encryption` column, and Phase 8 adds per-device
   ciphertext envelopes. Until then, the server can read messages.
+
+## Media and groups (implemented, Phase 7)
+
+### Attachments
+
+```
+app ── POST /conversations/:id/attachments {kind, type, size, …} ──► Worker: attachment row (unsent)
+app ── PUT /attachments/:id/content (+ /thumbnail for videos) ─────► Worker ──stream──► R2 (private)
+app ── POST /conversations/:id/messages {id, attachmentId} ────────► ConversationRoom: binds it
+member ── GET /attachments/:id/content (Range) ◄────────────────── Worker ◄── R2
+```
+
+- **Storage:**
+  - Files live in the **private** R2 bucket under `att/<conversation>/<attachment>`;
+    nothing is public and there are no pre-signed URLs.
+  - Every read and write goes through the Worker with the caller's access token.
+  - A file is readable by the **current members** of its conversation once sent, and
+    by its uploader before that. Everyone else gets 404, including people removed
+    from the group.
+- **Upload limits:**
+  - Per kind (`ATTACHMENT_LIMITS`): photos 20 MB, videos and documents 100 MB (the
+    Worker request limit), voice 15 MB. Video posters (JPEG) are 512 KB.
+  - Allowed types: photos JPEG/PNG/HEIC/WebP/GIF; video MP4/QuickTime; voice
+    AAC/M4A/MP3; documents any type.
+  - Uploads must send `Content-Length` equal to the declared size; R2 confirms the
+    stored size.
+- **Serving:**
+  - Documents (and anything not on the inline list) are served as
+    `application/octet-stream` with `Content-Disposition: attachment`,
+    `X-Content-Type-Options: nosniff` and a `sandbox` CSP, so a file can never render
+    as a page.
+  - Byte ranges are supported (video players need them).
+- **Lifecycle:**
+  - An attachment can be sent once, by its uploader, in its conversation.
+  - Uploads never sent are deleted after 24 h by an hourly cron (`scheduled` handler).
+  - Deleting a message deletes its files.
+- **App, sending:**
+  - Photos are re-encoded as JPEG (longest side ≤ 2048), which **drops EXIF metadata
+    such as GPS location** (verified on the Simulator).
+  - Videos get a poster (first frame) and posters/photos a tiny inline preview
+    (≤ 6 KB base64), so bubbles have something to show immediately.
+  - Files are copied into `Documents/outbox`. The outbox remembers each step (create
+    → poster → upload → send) on the pending message, so a send resumes after a
+    restart, and an upload that expired on the server starts again.
+  - Upload progress shows in the bubble.
+- **App, receiving:**
+  - Files download with the user's token into `Caches/media/<attachment id>`, once
+    (concurrent requests are deduplicated) and only when needed: images, posters and
+    voice when shown; videos and documents when opened.
+  - The sender's own copy moves from the outbox into the cache, so it's never
+    downloaded again.
+  - Sign-out deletes both directories.
+- **Voice messages:** recorded with expo-audio (mono AAC, 64 kbps, up to 15 min) with
+  a 64-point waveform from metering; played with expo-audio.
+- **Opening and saving:**
+  - Videos play in the full-screen viewer (expo-video) after downloading.
+  - Documents open through the share sheet ("Open in…", "Save to Files") under their
+    real name.
+  - "Save to Photos" asks for add-only photo access.
+
+### Reactions and deletion
+
+- **Reactions:** one per person per message, set or removed through the
+  `ConversationRoom`. They show at once in the app and are reverted if the server
+  refuses.
+- **Delete for everyone:** the sender, or a group admin. It erases the text, the
+  file and the reactions, and the message stays as a "Message deleted" marker.
+  "Delete for me" hides it on this device only.
+- **Revisions:**
+  - Every change to a message (sent, reacted to, deleted) gives it the
+    conversation's next revision (`rev`), assigned by the `ConversationRoom` like
+    `seq`.
+  - Catch-up asks for `changedSince=<max rev>`, so devices that were offline get
+    edits too.
+  - Changes to old messages that aren't loaded are skipped (they arrive current when
+    scrolled to), which keeps history gap-free.
+  - A stale copy can never overwrite a newer one.
+
+### Group administration
+
+- **Who can do what:**
+  - Admins can rename, add people (up to 64 members), remove people, and make or
+    remove admins.
+  - Anyone can leave.
+  - A group always keeps an admin: if the last one leaves, the longest-standing
+    member is promoted, and a group can't demote its last admin.
+- **System messages:** each change is a `system` message ("Maya added Dan") in the
+  conversation. It is not unread and never pushed.
+- **People added:** they start reading from the current position (earlier history
+  isn't marked unread).
+- **People removed or leaving:** they get a `conversation` event; the app then gets
+  404 and removes the chat and its messages from the device.
 
 ## Calling (implemented, Phase 5)
 
@@ -400,15 +491,15 @@ Planned:
 
 ## Services and cost (nothing is deployed without approval)
 
-| Service                      | Needed for                     | Cost notes                                                                   |
-| ---------------------------- | ------------------------------ | ---------------------------------------------------------------------------- |
-| Cloudflare Workers / D1 / DO | API, real-time, storage        | Local development is free (Miniflare). Free plan likely enough for a family. |
-| Cloudflare R2                | Media                          | Free tier; enabling R2 requires a payment method on the account              |
-| Apple Developer Program      | Push, VoIP, TestFlight         | US$99/year; required from Phase 6                                            |
-| Expo EAS Build               | Android APK, iOS device builds | Free tier has a monthly build quota                                          |
-| Firebase Cloud Messaging     | Android push                   | Free (needs a Firebase project)                                              |
-| Push relay hosting           | APNs over HTTP/2               | Any small always-on Node host; free tiers exist. Runs locally in development |
-| LiveKit Cloud (or self-host) | Voice and video                | Free tier available; self-hosting needs a server. Local dev server is free.  |
+| Service                      | Needed for                     | Cost notes                                                                                                  |
+| ---------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Cloudflare Workers / D1 / DO | API, real-time, storage        | Local development is free (Miniflare). Free plan likely enough for a family.                                |
+| Cloudflare R2                | Media                          | Local development uses Miniflare's R2 (free). Enabling R2 on a Cloudflare account requires a payment method |
+| Apple Developer Program      | Push, VoIP, TestFlight         | US$99/year; required from Phase 6                                                                           |
+| Expo EAS Build               | Android APK, iOS device builds | Free tier has a monthly build quota                                                                         |
+| Firebase Cloud Messaging     | Android push                   | Free (needs a Firebase project)                                                                             |
+| Push relay hosting           | APNs over HTTP/2               | Any small always-on Node host; free tiers exist. Runs locally in development                                |
+| LiveKit Cloud (or self-host) | Voice and video                | Free tier available; self-hosting needs a server. Local dev server is free.                                 |
 
 ## Known risks
 

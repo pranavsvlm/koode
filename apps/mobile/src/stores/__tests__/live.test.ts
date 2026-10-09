@@ -1,7 +1,8 @@
 import type { ConversationSummary } from '@koode/shared';
 import { ME } from '@/domain/types';
 import type { LocalMessage, Snapshot } from '@/features/messaging';
-import { deriveLive, messageStatus } from '../chat';
+import { normalizeMessage } from '@/features/messaging/types';
+import { deriveLive, liveAttachment, messageStatus, systemText } from '../chat';
 
 const me = 'usr_me';
 const conv = (members: [string, number, number][]): ConversationSummary => ({
@@ -10,6 +11,7 @@ const conv = (members: [string, number, number][]): ConversationSummary => ({
   title: null,
   createdAt: 0,
   lastSeq: 5,
+  lastRev: 5,
   lastMessage: null,
   unreadCount: 0,
   members: members.map(([userId, lastDeliveredSeq, lastReadSeq]) => ({
@@ -23,16 +25,18 @@ const msg = (
   seq: number | null,
   state: LocalMessage['state'] = 'sent',
   senderId = me,
-): LocalMessage => ({
-  id: `m${seq}`,
-  conversationId: 'c1',
-  seq,
-  senderId,
-  body: 'x',
-  replyToId: null,
-  createdAt: 0,
-  state,
-});
+): LocalMessage =>
+  normalizeMessage({
+    id: `m${seq}`,
+    conversationId: 'c1',
+    seq,
+    rev: seq,
+    senderId,
+    body: 'x',
+    replyToId: null,
+    createdAt: 0,
+    state,
+  });
 
 describe('messageStatus', () => {
   it('follows the outbox state first', () => {
@@ -96,16 +100,29 @@ describe('deriveLive', () => {
           ['usr_b', 1, 1],
         ]),
       ],
-      messages: { c1: [msg(1), msg(2, 'sent', 'usr_b')] },
+      messages: {
+        c1: [
+          msg(1),
+          {
+            ...msg(2, 'sent', 'usr_b'),
+            reactions: [
+              { userId: me, emoji: '❤️' },
+              { userId: 'usr_b', emoji: '❤️' },
+            ],
+          },
+          { ...msg(3, 'sent', 'usr_b'), body: '', deletedAt: 9 },
+        ],
+      },
       users: { usr_b: { id: 'usr_b', username: 'b', displayName: 'Bee', about: '' } },
       typing: { c1: ['usr_b', me] },
       hasMore: { c1: true },
+      progress: {},
     };
     const out = deriveLive(
       snap,
       me,
       {
-        reactions: { m2: [{ emoji: '❤️', userIds: [ME] }] },
+        reactions: {},
         deleted: { m1: true },
         pinned: { c1: true },
         muted: {},
@@ -126,9 +143,93 @@ describe('deriveLive', () => {
     expect(out.messages.c1![1]).toMatchObject({
       senderId: 'usr_b',
       text: 'x',
-      reactions: [{ emoji: '❤️', userIds: [ME] }],
+      reactions: [{ emoji: '❤️', userIds: [ME, 'usr_b'] }],
     });
+    // Deleted for everyone on the server.
+    expect(out.messages.c1![2]).toMatchObject({ deleted: true, text: undefined, reactions: [] });
     expect(out.contacts.usr_b).toMatchObject({ displayName: 'Bee', username: 'b' });
     expect(out.hasMore.c1).toBe(true);
+  });
+});
+
+describe('attachments and group changes', () => {
+  it('shows a file being sent from the device, with progress', () => {
+    const m: LocalMessage = {
+      ...msg(null, 'pending'),
+      kind: 'attachment',
+      body: '',
+      upload: {
+        uri: 'file:///outbox/a.jpg',
+        posterUri: null,
+        request: {
+          kind: 'image',
+          mimeType: 'image/jpeg',
+          sizeBytes: 5,
+          width: 4,
+          height: 3,
+          preview: 'AAA',
+        },
+        attachmentId: null,
+        posterUploaded: false,
+        uploaded: false,
+      },
+    };
+    expect(liveAttachment(m, 0.4)).toEqual({
+      kind: 'image',
+      width: 4,
+      height: 3,
+      attachmentId: undefined,
+      mimeType: 'image/jpeg',
+      localUri: 'file:///outbox/a.jpg',
+      localPosterUri: undefined,
+      preview: 'AAA',
+      hasPoster: false,
+      progress: 0.4,
+    });
+  });
+
+  it('maps a server attachment to a downloadable one', () => {
+    const m: LocalMessage = {
+      ...msg(4),
+      kind: 'attachment',
+      attachment: {
+        id: 'att_1',
+        kind: 'voice',
+        mimeType: 'audio/mp4',
+        sizeBytes: 900,
+        name: null,
+        width: null,
+        height: null,
+        durationMs: 4200,
+        waveform: [0.1, 0.9],
+        preview: null,
+        hasThumbnail: false,
+      },
+    };
+    expect(liveAttachment(m)).toMatchObject({
+      kind: 'voice',
+      attachmentId: 'att_1',
+      durationSec: 4.2,
+      waveform: [0.1, 0.9],
+      localUri: undefined,
+      progress: undefined,
+    });
+  });
+
+  it('describes group changes from my point of view', () => {
+    const name = (id: string, start: boolean) =>
+      id === me
+        ? start
+          ? 'You'
+          : 'you'
+        : ({ a: 'Maya', b: 'Dan', c: 'Sam' } as Record<string, string>)[id]!;
+    const e = (action: string, actorId: string, targetIds: string[], title: string | null = null) =>
+      systemText({ action: action as never, actorId, targetIds, title }, name);
+    expect(e('created', 'a', ['b'], 'Family')).toBe('Maya created the group “Family”');
+    expect(e('added', me, ['b', 'c'])).toBe('You added Dan and Sam');
+    expect(e('removed', 'a', [me])).toBe('Maya removed you');
+    expect(e('left', 'b', [])).toBe('Dan left');
+    expect(e('promoted', 'a', ['b', 'c', me])).toBe('Maya made Dan, Sam and you an admin');
+    expect(e('renamed', 'a', [], 'Cousins')).toBe('Maya renamed the group to “Cousins”');
   });
 });

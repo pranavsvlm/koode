@@ -1,4 +1,5 @@
 import {
+  AttachmentMeta,
   type Call,
   ConversationList,
   ConversationSummary,
@@ -9,12 +10,14 @@ import {
 import * as Crypto from 'expo-crypto';
 import { z } from 'zod';
 import { authClient, SignedOutError } from '@/features/auth';
+import { adoptUploaded, discardFiles, upload } from '@/features/media/files';
 import { env } from '@/lib/env';
 import { usePreferences } from '@/stores/preferences';
 import { MessagingEngine, type MessagingApi, type SocketLike } from './engine';
 import { sqliteStore } from './sqliteStore';
 
 const Any = z.unknown();
+const conv = (id: string) => `/v1/conversations/${encodeURIComponent(id)}`;
 
 const api: MessagingApi = {
   getAccessToken: authClient.getAccessToken,
@@ -23,10 +26,11 @@ const api: MessagingApi = {
     (await authClient.request('/v1/conversations', ConversationList)).conversations,
   conversation: (id) =>
     authClient.request(`/v1/conversations/${encodeURIComponent(id)}`, ConversationSummary),
-  messages: (id, { before, after, limit }) => {
+  messages: (id, { before, after, changedSince, limit }) => {
     const q = new URLSearchParams();
     if (before !== undefined) q.set('before', String(before));
     if (after !== undefined) q.set('after', String(after));
+    if (changedSince !== undefined) q.set('changedSince', String(changedSince));
     if (limit !== undefined) q.set('limit', String(limit));
     return authClient.request(
       `/v1/conversations/${encodeURIComponent(id)}/messages?${q}`,
@@ -45,6 +49,34 @@ const api: MessagingApi = {
     }),
   createConversation: (body) =>
     authClient.request('/v1/conversations', ConversationSummary, { method: 'POST', body }),
+  createAttachment: (id, body) =>
+    authClient.request(`${conv(id)}/attachments`, AttachmentMeta, { method: 'POST', body }),
+  upload,
+  react: (id, messageId, emoji) =>
+    authClient.request(`${conv(id)}/messages/${encodeURIComponent(messageId)}/reaction`, Message, {
+      method: 'PUT',
+      body: { emoji },
+    }),
+  deleteMessage: (id, messageId) =>
+    authClient.request(`${conv(id)}/messages/${encodeURIComponent(messageId)}`, Message, {
+      method: 'DELETE',
+    }),
+  renameGroup: (id, title) =>
+    authClient.request(conv(id), ConversationSummary, { method: 'PATCH', body: { title } }),
+  addMembers: (id, userIds) =>
+    authClient.request(`${conv(id)}/members`, ConversationSummary, {
+      method: 'POST',
+      body: { userIds },
+    }),
+  setRole: (id, userId, role) =>
+    authClient.request(`${conv(id)}/members/${encodeURIComponent(userId)}`, ConversationSummary, {
+      method: 'PATCH',
+      body: { role },
+    }),
+  removeMember: (id, userId) =>
+    authClient.request(`${conv(id)}/members/${encodeURIComponent(userId)}`, Any, {
+      method: 'DELETE',
+    }),
 };
 
 /** React Native WebSocket, authenticated with a header (never a URL token). */
@@ -95,6 +127,8 @@ export function createMessagingEngine(
     },
     onSignedOut,
     onCall,
+    onUploaded: adoptUploaded,
+    onDiscarded: discardFiles,
     isSignedOutError: (e) => e instanceof SignedOutError,
   });
 }

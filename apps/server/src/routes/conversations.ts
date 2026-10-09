@@ -1,7 +1,14 @@
 import {
+  AddMembersRequest,
+  CreateAttachmentRequest,
   CreateConversationRequest,
   ReceiptRequest,
+  RenameGroupRequest,
   SendMessageRequest,
+  SetReactionRequest,
+  UpdateMemberRequest,
+  type AttachmentMeta,
+  type OkResponse,
   type ConversationSummary,
   type Message,
   type MessagePage,
@@ -14,10 +21,10 @@ import { newId } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
 import { parseJson } from '../lib/validate';
 import {
+  hydrate,
   loadSummaries,
-  MESSAGE_COLUMNS,
+  MESSAGE_SELECT,
   notifyUsers,
-  toMessage,
   type MessageRow,
 } from '../messaging/rows';
 
@@ -139,9 +146,8 @@ export const conversations = new Hono<AppEnv>()
           .bind(id, m, now),
       ),
     ]);
-    c.executionCtx.waitUntil(
-      notifyUsers(c.env, [userId, ...memberIds], { type: 'conversation', conversationId: id }),
-    );
+    // "Maya created the group": also tells every member about the new conversation.
+    unwrap(await room(c.env, id).created({ conversationId: id, userId }));
     return c.json((await loadSummaries(db, userId, id))[0]!, 201);
   })
 
@@ -152,8 +158,10 @@ export const conversations = new Hono<AppEnv>()
   })
 
   /**
-   * History, oldest first. `after=<seq>` pages forward (sync after reconnect);
-   * otherwise pages backward from `before=<seq>` (default: newest).
+   * History, oldest first. `after=<seq>` pages forward; `changedSince=<rev>`
+   * returns messages sent *or changed* (reactions, deletion) after a revision,
+   * in revision order (catch-up); otherwise pages backward from `before=<seq>`
+   * (default: newest).
    */
   .get('/:id/messages', async (c) => {
     const id = c.req.param('id');
@@ -162,36 +170,80 @@ export const conversations = new Hono<AppEnv>()
       throw new ApiError('not_found', 'Conversation not found');
     const after = parseCursor(c.req.query('after'));
     const before = parseCursor(c.req.query('before'));
+    const changedSince = parseCursor(c.req.query('changedSince'));
     const limit = Math.min(
       Math.max(parseCursor(c.req.query('limit')) ?? PAGE_DEFAULT, 1),
       PAGE_MAX,
     );
 
-    const rows =
-      after !== undefined
-        ? (
-            await db
-              .prepare(
-                `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`,
-              )
-              .bind(id, after, limit + 1)
-              .all<MessageRow>()
-          ).results
-        : (
-            await db
-              .prepare(
-                `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
-              )
-              .bind(id, before ?? Number.MAX_SAFE_INTEGER, limit + 1)
-              .all<MessageRow>()
-          ).results.reverse();
+    const query = (where: string, order: string, ...binds: unknown[]) =>
+      db
+        .prepare(
+          `${MESSAGE_SELECT} WHERE m.conversation_id = ? AND ${where} ORDER BY ${order} LIMIT ?`,
+        )
+        .bind(id, ...binds, limit + 1)
+        .all<MessageRow>()
+        .then((r) => r.results);
+
+    let rows: MessageRow[];
+    let forward = true;
+    if (changedSince !== undefined) rows = await query('m.rev > ?', 'm.rev ASC', changedSince);
+    else if (after !== undefined) rows = await query('m.seq > ?', 'm.seq ASC', after);
+    else {
+      forward = false;
+      rows = (await query('m.seq < ?', 'm.seq DESC', before ?? Number.MAX_SAFE_INTEGER)).reverse();
+    }
 
     const hasMore = rows.length > limit;
-    const page =
-      after !== undefined
-        ? rows.slice(0, limit)
-        : rows.slice(rows.length - Math.min(rows.length, limit));
-    return c.json<MessagePage>({ messages: page.map(toMessage), hasMore });
+    const page = forward
+      ? rows.slice(0, limit)
+      : rows.slice(rows.length - Math.min(rows.length, limit));
+    return c.json<MessagePage>({ messages: await hydrate(db, page), hasMore });
+  })
+
+  /** Start an upload: the file itself goes to PUT /v1/attachments/:id/content. */
+  .post('/:id/attachments', async (c) => {
+    const req = await parseJson(c, CreateAttachmentRequest);
+    const conversationId = c.req.param('id');
+    const { userId } = c.get('auth');
+    const db = c.env.DB;
+    if (!(await isMember(db, conversationId, userId)))
+      throw new ApiError('not_found', 'Conversation not found');
+    const meta: AttachmentMeta = {
+      id: newId('att'),
+      kind: req.kind,
+      mimeType: req.mimeType,
+      sizeBytes: req.sizeBytes,
+      name: req.kind === 'document' ? req.name : null,
+      width: req.kind === 'image' || req.kind === 'video' ? req.width : null,
+      height: req.kind === 'image' || req.kind === 'video' ? req.height : null,
+      durationMs: req.kind === 'video' || req.kind === 'voice' ? req.durationMs : null,
+      waveform: req.kind === 'voice' ? req.waveform : null,
+      preview: req.kind === 'image' || req.kind === 'video' ? (req.preview ?? null) : null,
+      hasThumbnail: false,
+    };
+    await db
+      .prepare(
+        `INSERT INTO attachments (id, conversation_id, uploader_id, kind, mime_type, size_bytes, name, width, height, duration_ms, waveform, preview, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        meta.id,
+        conversationId,
+        userId,
+        meta.kind,
+        meta.mimeType,
+        meta.sizeBytes,
+        meta.name,
+        meta.width,
+        meta.height,
+        meta.durationMs,
+        meta.waveform ? JSON.stringify(meta.waveform) : null,
+        meta.preview,
+        Date.now(),
+      )
+      .run();
+    return c.json<AttachmentMeta>(meta, 201);
   })
 
   .post('/:id/messages', async (c) => {
@@ -206,9 +258,90 @@ export const conversations = new Hono<AppEnv>()
         id: req.id,
         body: req.body,
         replyToId: req.replyToId ?? null,
+        attachmentId: req.attachmentId ?? null,
       }),
     );
     return c.json<Message>(message, 201);
+  })
+
+  /** My reaction (one per person); `{emoji: null}` removes it. */
+  .put('/:id/messages/:messageId/reaction', async (c) => {
+    const { emoji } = await parseJson(c, SetReactionRequest);
+    const conversationId = c.req.param('id');
+    return c.json<Message>(
+      unwrap(
+        await room(c.env, conversationId).react({
+          conversationId,
+          userId: c.get('auth').userId,
+          messageId: c.req.param('messageId'),
+          emoji,
+        }),
+      ),
+    );
+  })
+
+  /** Delete for everyone (sender, or a group admin). */
+  .delete('/:id/messages/:messageId', async (c) => {
+    const conversationId = c.req.param('id');
+    return c.json<Message>(
+      unwrap(
+        await room(c.env, conversationId).remove({
+          conversationId,
+          userId: c.get('auth').userId,
+          messageId: c.req.param('messageId'),
+        }),
+      ),
+    );
+  })
+
+  // ——— Group administration (admins; anyone may leave) ———
+
+  .patch('/:id', async (c) => {
+    const { title } = await parseJson(c, RenameGroupRequest);
+    const conversationId = c.req.param('id');
+    const { userId } = c.get('auth');
+    unwrap(await room(c.env, conversationId).rename({ conversationId, userId, title }));
+    return c.json<ConversationSummary>((await loadSummaries(c.env.DB, userId, conversationId))[0]!);
+  })
+
+  .post('/:id/members', async (c) => {
+    const { userIds } = await parseJson(c, AddMembersRequest);
+    const conversationId = c.req.param('id');
+    const { userId } = c.get('auth');
+    const ids = [...new Set(userIds)];
+    if ((await activeUsers(c.env.DB, ids)).size !== ids.length)
+      throw new ApiError('not_found', 'Some people weren’t found');
+    unwrap(await room(c.env, conversationId).addMembers({ conversationId, userId, userIds: ids }));
+    return c.json<ConversationSummary>((await loadSummaries(c.env.DB, userId, conversationId))[0]!);
+  })
+
+  .patch('/:id/members/:userId', async (c) => {
+    const { role } = await parseJson(c, UpdateMemberRequest);
+    const conversationId = c.req.param('id');
+    const { userId } = c.get('auth');
+    unwrap(
+      await room(c.env, conversationId).setRole({
+        conversationId,
+        userId,
+        targetId: c.req.param('userId'),
+        role,
+      }),
+    );
+    return c.json<ConversationSummary>((await loadSummaries(c.env.DB, userId, conversationId))[0]!);
+  })
+
+  /** Remove someone, or `DELETE …/members/<me>` to leave. */
+  .delete('/:id/members/:userId', async (c) => {
+    const conversationId = c.req.param('id');
+    const { userId } = c.get('auth');
+    unwrap(
+      await room(c.env, conversationId).removeMember({
+        conversationId,
+        userId,
+        targetId: c.req.param('userId'),
+      }),
+    );
+    return c.json<OkResponse>({ ok: true });
   })
 
   .post('/:id/receipts', async (c) => {

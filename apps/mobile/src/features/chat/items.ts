@@ -17,12 +17,16 @@ export type ChatItem =
       /** Groups: show sender avatar beside the last bubble of a run. */
       showAvatar: boolean;
     }
-  | { type: 'day'; key: string; label: string };
+  | { type: 'day'; key: string; label: string }
+  /** Group change, centred ("Maya added Dan"). */
+  | { type: 'system'; key: string; text: string };
 
 function sameGroup(a: Message | undefined, b: Message | undefined): boolean {
   return (
     !!a &&
     !!b &&
+    !a.system &&
+    !b.system &&
     a.senderId === b.senderId &&
     Math.abs(b.createdAt - a.createdAt) <= GROUP_WINDOW_MS &&
     calendarDaysBetween(a.createdAt, b.createdAt) === 0
@@ -48,14 +52,16 @@ export function buildChatItems(
     const position: GroupPosition =
       joinsPrev && joinsNext ? 'middle' : joinsPrev ? 'last' : joinsNext ? 'first' : 'single';
 
-    items.push({
-      type: 'message',
-      key: message.id,
-      message,
-      position,
-      showSender: isGroup && !joinsPrev,
-      showAvatar: isGroup && !joinsNext,
-    });
+    if (message.system) items.push({ type: 'system', key: message.id, text: message.system });
+    else
+      items.push({
+        type: 'message',
+        key: message.id,
+        message,
+        position,
+        showSender: isGroup && !joinsPrev,
+        showAvatar: isGroup && !joinsNext,
+      });
 
     // Inverted list: the divider for a day goes *after* that day's oldest message.
     if (!prev || calendarDaysBetween(prev.createdAt, message.createdAt) !== 0) {

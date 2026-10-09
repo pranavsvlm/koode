@@ -12,6 +12,7 @@ import { invites } from './routes/invites';
 import { me } from './routes/me';
 import { calls } from './routes/calls';
 import { push } from './routes/push';
+import { attachments } from './routes/attachments';
 import { conversations } from './routes/conversations';
 import { realtime } from './routes/realtime';
 import { users } from './routes/users';
@@ -45,6 +46,7 @@ export function createApp() {
   app.route(`${API_PREFIX}/conversations`, conversations);
   app.route(`${API_PREFIX}/calls`, calls);
   app.route(`${API_PREFIX}/push`, push);
+  app.route(`${API_PREFIX}/attachments`, attachments);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found', c.get('requestId')), 404));
 

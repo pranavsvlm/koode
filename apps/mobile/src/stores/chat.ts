@@ -1,4 +1,10 @@
-import type { Call, ConversationSummary as ServerConversation } from '@koode/shared';
+import type {
+  AttachmentMeta,
+  Call,
+  ConversationSummary as ServerConversation,
+  Reaction as ServerReaction,
+  SystemEvent,
+} from '@koode/shared';
 import { create } from 'zustand';
 import { buildFixtures, CANNED_REPLIES } from '@/dev/fixtures';
 import { useDevSettings } from '@/dev/settings';
@@ -13,6 +19,8 @@ import {
   type Reaction,
 } from '@/domain/types';
 import { callApi, callController, setCallIdentity } from '@/features/calls';
+import { clearMediaFiles } from '@/features/media/files';
+import type { UploadDraft } from '@/features/media/process';
 import {
   clearMessageCache,
   createMessagingEngine,
@@ -30,10 +38,16 @@ import { usePreferences } from './preferences';
  * Screens only depend on this store's shape. In live mode my own user id is
  * mapped to `ME` at this boundary.
  *
- * Not yet server-backed (Phase 7): reactions, deleting messages, pin, mute.
+ * Device-only: pin, mute and "delete for me".
  */
 
-export type Draft = { text?: string; attachment?: Attachment; replyToId?: string };
+/** `upload`: a processed file to send (live); `attachment`: sample data. */
+export type Draft = {
+  text?: string;
+  attachment?: Attachment;
+  upload?: UploadDraft;
+  replyToId?: string;
+};
 
 type Overlay = {
   reactions: Record<string, Reaction[]>;
@@ -63,8 +77,19 @@ type ChatState = {
   retry: (messageId: string) => void;
   loadOlder: (conversationId: string) => Promise<void>;
   typing: (conversationId: string) => void;
-  toggleReaction: (conversationId: string, messageId: string, emoji: string) => void;
-  deleteMessage: (conversationId: string, messageId: string) => void;
+  /** Rejects if the server refused (live). */
+  toggleReaction: (conversationId: string, messageId: string, emoji: string) => Promise<void>;
+  /** "me": hide on this device (or cancel an unsent message); "everyone": delete for all. */
+  deleteMessage: (
+    conversationId: string,
+    messageId: string,
+    scope?: 'me' | 'everyone',
+  ) => Promise<void>;
+  renameGroup: (conversationId: string, title: string) => Promise<void>;
+  addMembers: (conversationId: string, userIds: string[]) => Promise<void>;
+  removeMember: (conversationId: string, userId: string) => Promise<void>;
+  setAdmin: (conversationId: string, userId: string, admin: boolean) => Promise<void>;
+  leaveGroup: (conversationId: string) => Promise<void>;
   markRead: (conversationId: string) => void;
   setPinned: (conversationId: string, pinned: boolean) => void;
   setMuted: (conversationId: string, muted: boolean) => void;
@@ -112,6 +137,93 @@ export function messageStatus(
   return 'sent';
 }
 
+/** One chip per emoji, with who reacted. */
+export function groupReactions(list: ServerReaction[], mapId: (id: string) => string): Reaction[] {
+  const by = new Map<string, string[]>();
+  for (const r of list) by.set(r.emoji, [...(by.get(r.emoji) ?? []), mapId(r.userId)]);
+  return [...by].map(([emoji, userIds]) => ({ emoji, userIds }));
+}
+
+const quote = (s: string | null) => `“${s ?? ''}”`;
+const join = (names: string[]) =>
+  names.length <= 1 ? (names[0] ?? '') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+
+/** "Maya added Dan and Sam". `name(id, atStart)` gives "You"/"you" for me. */
+export function systemText(e: SystemEvent, name: (id: string, start: boolean) => string): string {
+  const actor = name(e.actorId, true);
+  const targets = join(e.targetIds.map((t) => name(t, false)));
+  switch (e.action) {
+    case 'created':
+      return `${actor} created the group ${quote(e.title)}`;
+    case 'renamed':
+      return `${actor} renamed the group to ${quote(e.title)}`;
+    case 'added':
+      return `${actor} added ${targets}`;
+    case 'removed':
+      return `${actor} removed ${targets}`;
+    case 'left':
+      return `${actor} left`;
+    case 'promoted':
+      return `${actor} made ${targets} an admin`;
+    case 'demoted':
+      return `${actor} removed ${targets} as an admin`;
+  }
+}
+
+/** Server attachment, or the file still being sent. */
+export function liveAttachment(m: LocalMessage, progress?: number): Attachment | undefined {
+  /** What a server attachment and a pending upload request have in common. */
+  type Common = {
+    kind: AttachmentMeta['kind'];
+    mimeType: string;
+    sizeBytes: number;
+    name?: string | null;
+    width?: number | null;
+    height?: number | null;
+    durationMs?: number | null;
+    waveform?: number[] | null;
+    preview?: string | null;
+  };
+  const meta = (m.attachment ?? m.upload?.request ?? null) as Common | null;
+  if (!meta) return undefined;
+  const ref = {
+    attachmentId: m.attachment?.id,
+    mimeType: meta.mimeType,
+    localUri: m.attachment ? undefined : m.upload?.uri,
+    localPosterUri: m.attachment ? undefined : (m.upload?.posterUri ?? undefined),
+    preview: meta.preview ?? null,
+    hasPoster: m.attachment?.hasThumbnail ?? false,
+    progress: m.state === 'pending' ? progress : undefined,
+  };
+  switch (meta.kind) {
+    case 'image':
+      return { kind: 'image', width: meta.width ?? 1, height: meta.height ?? 1, ...ref };
+    case 'video':
+      return {
+        kind: 'video',
+        width: meta.width ?? 1,
+        height: meta.height ?? 1,
+        durationSec: (meta.durationMs ?? 0) / 1000,
+        ...ref,
+      };
+    case 'voice':
+      return {
+        kind: 'voice',
+        durationSec: (meta.durationMs ?? 0) / 1000,
+        waveform: meta.waveform ?? [],
+        ...ref,
+      };
+    case 'document':
+      return {
+        kind: 'document',
+        name: meta.name ?? 'File',
+        sizeBytes: meta.sizeBytes,
+        ...ref,
+        mimeType: meta.mimeType,
+      };
+  }
+}
+
 export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRead: boolean) {
   const mapId = (id: string) => (id === me ? ME : id);
   const contacts: Record<string, Contact> = {};
@@ -139,20 +251,24 @@ export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRea
       createdAt: c.createdAt,
     };
   }
+  const name = (id: string, start: boolean) =>
+    id === me ? (start ? 'You' : 'you') : (contacts[id]?.displayName ?? 'Someone');
   const messages: Record<string, Message[]> = {};
   for (const [convId, list] of Object.entries(snap.messages)) {
     messages[convId] = list.map((m) => {
-      const deleted = overlay.deleted[m.id] === true;
+      const deleted = m.deletedAt !== null || overlay.deleted[m.id] === true;
       return {
         id: m.id,
         conversationId: m.conversationId,
         senderId: mapId(m.senderId),
-        text: deleted ? undefined : m.body,
+        text: deleted || !m.body ? undefined : m.body,
+        attachment: deleted ? undefined : liveAttachment(m, snap.progress[m.id]),
         createdAt: m.createdAt,
         status: m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered',
         replyToId: m.replyToId ?? undefined,
-        reactions: deleted ? [] : (overlay.reactions[m.id] ?? []),
+        reactions: deleted ? [] : groupReactions(m.reactions, mapId),
         deleted,
+        system: m.kind === 'system' && m.system ? systemText(m.system, name) : undefined,
       };
     });
   }
@@ -245,6 +361,7 @@ export const useChat = create<ChatState>((set, get) => {
       unsubscribe = null;
       if (engine) await engine.reset();
       else await clearMessageCache().catch(() => {});
+      clearMediaFiles();
       engine = null;
       engineMe = null;
       set({
@@ -262,7 +379,8 @@ export const useChat = create<ChatState>((set, get) => {
 
     send: (conversationId, draft) => {
       if (get().mode === 'live') {
-        if (draft.text?.trim()) engine?.send(conversationId, draft.text, draft.replyToId ?? null);
+        if (draft.upload || draft.text?.trim())
+          engine?.send(conversationId, draft.text ?? '', draft.replyToId ?? null, draft.upload);
         return;
       }
       sampleSend(set, get, conversationId, draft);
@@ -274,7 +392,7 @@ export const useChat = create<ChatState>((set, get) => {
     },
     typing: (conversationId) => engine?.typing(conversationId),
 
-    toggleReaction: (conversationId, messageId, emoji) => {
+    toggleReaction: async (conversationId, messageId, emoji) => {
       const apply = (current: Reaction[]) => {
         const mine = current.find((r) => r.userIds.includes(ME));
         // One reaction per person: remove my previous one, then add unless toggling off.
@@ -290,10 +408,9 @@ export const useChat = create<ChatState>((set, get) => {
         return reactions;
       };
       if (get().mode === 'live') {
-        setOverlay((o) => ({
-          ...o,
-          reactions: { ...o.reactions, [messageId]: apply(o.reactions[messageId] ?? []) },
-        }));
+        const m = get().messages[conversationId]?.find((x) => x.id === messageId);
+        const mine = m?.reactions.find((r) => r.userIds.includes(ME));
+        await engine?.react(conversationId, messageId, mine?.emoji === emoji ? null : emoji);
         return;
       }
       set((s) => ({
@@ -304,9 +421,16 @@ export const useChat = create<ChatState>((set, get) => {
       }));
     },
 
-    deleteMessage: (conversationId, messageId) => {
+    deleteMessage: async (conversationId, messageId, scope = 'me') => {
       if (get().mode === 'live') {
-        setOverlay((o) => ({ ...o, deleted: { ...o.deleted, [messageId]: true } }));
+        const m = get().messages[conversationId]?.find((x) => x.id === messageId);
+        if (m && (m.status === 'sending' || m.status === 'failed')) {
+          engine?.discard(messageId); // never sent: just drop it
+        } else if (scope === 'everyone') {
+          await engine?.deleteForEveryone(conversationId, messageId);
+        } else {
+          setOverlay((o) => ({ ...o, deleted: { ...o.deleted, [messageId]: true } }));
+        }
         return;
       }
       set((s) => ({
@@ -363,6 +487,27 @@ export const useChat = create<ChatState>((set, get) => {
           : engine.createConversation({ kind: 'direct', userId: others[0]! });
       }
       return sampleCreate(set, get, others, title);
+    },
+
+    renameGroup: async (conversationId, title) => {
+      if (get().mode === 'live') return engine?.renameGroup(conversationId, title);
+      set((s) => {
+        const c = s.conversations[conversationId];
+        return c ? { conversations: { ...s.conversations, [conversationId]: { ...c, title } } } : s;
+      });
+    },
+    addMembers: async (conversationId, userIds) => {
+      if (get().mode === 'live') return engine?.addMembers(conversationId, userIds);
+    },
+    removeMember: async (conversationId, userId) => {
+      if (get().mode === 'live') return engine?.removeMember(conversationId, userId);
+    },
+    setAdmin: async (conversationId, userId, admin) => {
+      if (get().mode === 'live')
+        return engine?.setRole(conversationId, userId, admin ? 'admin' : 'member');
+    },
+    leaveGroup: async (conversationId) => {
+      if (get().mode === 'live' && engineMe) return engine?.removeMember(conversationId, engineMe);
     },
 
     addCall: (call) => {

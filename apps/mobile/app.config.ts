@@ -18,6 +18,12 @@ const EAS_PROJECT_ID: string | undefined = undefined;
 // committed; an EAS "file" environment variable in cloud builds (docs/SETUP.md).
 const GOOGLE_SERVICES = process.env.GOOGLE_SERVICES_JSON;
 
+// One wording per permission: several plugins set the same Info.plist keys.
+const CAMERA = 'Koode uses your camera for video calls and to take photos and videos to send.';
+const MICROPHONE = 'Koode uses your microphone for calls, voice messages and videos.';
+const PHOTOS = 'Koode lets you choose photos and videos to send.';
+const SAVE_PHOTOS = 'Koode saves photos and videos you choose to your library.';
+
 const VARIANTS: Record<Variant, { name: string; id: string }> = {
   development: { name: 'Koode Dev', id: `${BUNDLE_ID_BASE}.dev` },
   preview: { name: 'Koode Preview', id: `${BUNDLE_ID_BASE}.preview` },
@@ -81,11 +87,26 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     '@livekit/react-native-expo-plugin',
     [
       '@config-plugins/react-native-webrtc',
+      { cameraPermission: CAMERA, microphonePermission: MICROPHONE },
+    ],
+    // Media (Phase 7): pick, record, save and play.
+    [
+      'expo-image-picker',
+      { photosPermission: PHOTOS, cameraPermission: CAMERA, microphonePermission: MICROPHONE },
+    ],
+    'expo-document-picker',
+    ['expo-audio', { microphonePermission: MICROPHONE, recordAudioAndroid: true }],
+    [
+      'expo-media-library',
       {
-        cameraPermission: 'Koode uses your camera for video calls.',
-        microphonePermission: 'Koode uses your microphone for voice and video calls.',
+        photosPermission: PHOTOS,
+        savePhotosPermission: SAVE_PHOTOS,
+        // Never read photo locations.
+        isAccessMediaLocationEnabled: false,
+        granularPermissions: ['photo', 'video'],
       },
     ],
+    ['expo-video', { supportsBackgroundPlayback: false, supportsPictureInPicture: false }],
     // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
     './plugins/withSceneLifecycle',
     // Dev builds reopen the last Metro server instead of showing the launcher, and

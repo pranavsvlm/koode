@@ -1,8 +1,8 @@
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useState } from 'react';
-import { StyleSheet, useWindowDimensions, View } from 'react-native';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, useWindowDimensions, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   FadeIn,
@@ -16,7 +16,10 @@ import Animated, {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { scheduleOnRN } from 'react-native-worklets';
 import { IconButton, Text, useToast } from '@/components/ui';
-import { ME } from '@/domain/types';
+import { useVideoPlayer, VideoView } from 'expo-video';
+import { ME, type Attachment } from '@/domain/types';
+import { MediaActionError, saveToPhotos, shareFile } from '@/features/media/actions';
+import { previewSource, useMediaFile } from '@/features/media/useMedia';
 import { formatDayDivider, formatTime } from '@/lib/format';
 import { useChat } from '@/stores/chat';
 import { springs } from '@/theme/tokens';
@@ -102,7 +105,6 @@ export default function MediaViewerScreen() {
 
   const a = message?.attachment;
   if (!message || !a || (a.kind !== 'image' && a.kind !== 'video')) return null;
-  const source = a.kind === 'image' ? a.source : a.poster;
   const sender = message.senderId === ME ? 'You' : (contacts[message.senderId]?.displayName ?? '');
   const fitted = Math.min(width, (height * a.width) / a.height);
 
@@ -117,12 +119,21 @@ export default function MediaViewerScreen() {
           style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}
         >
           <Animated.View style={imageStyle}>
-            <Image
-              source={source}
-              style={{ width: fitted, height: (fitted * a.height) / a.width }}
-              contentFit="contain"
-              accessibilityLabel={`${a.kind === 'video' ? 'Video' : 'Photo'} from ${sender}`}
-            />
+            {a.kind === 'video' && !a.poster ? (
+              <ViewerVideo
+                attachment={a}
+                width={fitted}
+                height={(fitted * a.height) / a.width}
+                label={`Video from ${sender}`}
+              />
+            ) : (
+              <ViewerImage
+                attachment={a}
+                width={fitted}
+                height={(fitted * a.height) / a.width}
+                label={`${a.kind === 'video' ? 'Video' : 'Photo'} from ${sender}`}
+              />
+            )}
           </Animated.View>
         </Animated.View>
       </GestureDetector>
@@ -163,7 +174,9 @@ export default function MediaViewerScreen() {
                 accessibilityLabel="Share"
                 color="#FFFFFF"
                 onPress={() =>
-                  toast.show({ title: 'Sharing arrives with media support (Phase 7)' })
+                  void shareFile(a).catch((e: unknown) =>
+                    toast.show({ title: 'Couldn’t share', message: errorText(e), tone: 'error' }),
+                  )
                 }
               />
               {message.text && (
@@ -180,12 +193,81 @@ export default function MediaViewerScreen() {
                 icon="download"
                 accessibilityLabel="Save to Photos"
                 color="#FFFFFF"
-                onPress={() => toast.show({ title: 'Saving arrives with media support (Phase 7)' })}
+                onPress={() =>
+                  void saveToPhotos(a)
+                    .then(() => toast.show({ title: 'Saved to Photos', tone: 'success' }))
+                    .catch((e: unknown) =>
+                      toast.show({ title: 'Couldn’t save', message: errorText(e), tone: 'error' }),
+                    )
+                }
               />
             </View>
           </MotionView>
         </>
       )}
     </View>
+  );
+}
+
+const errorText = (e: unknown) =>
+  e instanceof MediaActionError ? e.message : 'Check your connection and try again.';
+
+type Visual = Extract<Attachment, { kind: 'image' | 'video' }>;
+
+/** Full-size photo (or a sample video's still). */
+function ViewerImage(p: { attachment: Visual; width: number; height: number; label: string }) {
+  const a = p.attachment;
+  const bundled = a.kind === 'image' ? a.source : a.poster;
+  const file = useMediaFile(bundled ? undefined : a, a.kind === 'image' ? 'content' : 'thumbnail');
+  return (
+    <Image
+      source={bundled ?? (file.uri ? { uri: file.uri } : undefined)}
+      placeholder={previewSource(a)}
+      style={{ width: p.width, height: p.height }}
+      contentFit="contain"
+      transition={150}
+      accessibilityLabel={p.label}
+    />
+  );
+}
+
+/** Downloads the video (once; then cached) and plays it with system controls. */
+function ViewerVideo(p: { attachment: Visual; width: number; height: number; label: string }) {
+  const file = useMediaFile(p.attachment, 'content');
+  const poster = useMediaFile(p.attachment, 'thumbnail');
+  const player = useVideoPlayer(file.uri ? { uri: file.uri } : null, (pl) => {
+    pl.loop = false;
+  });
+  useEffect(() => {
+    if (file.uri) player.play();
+  }, [file.uri, player]);
+
+  if (!file.uri) {
+    return (
+      <View style={{ width: p.width, height: p.height }} className="items-center justify-center">
+        <Image
+          source={poster.uri ? { uri: poster.uri } : undefined}
+          placeholder={previewSource(p.attachment)}
+          style={StyleSheet.absoluteFill}
+          contentFit="contain"
+        />
+        {file.failed ? (
+          <Text variant="subhead" style={{ color: '#FFFFFF' }}>
+            Couldn’t load the video
+          </Text>
+        ) : (
+          <ActivityIndicator color="#FFFFFF" accessibilityLabel="Loading video" />
+        )}
+      </View>
+    );
+  }
+  return (
+    <VideoView
+      player={player}
+      style={{ width: p.width, height: p.height }}
+      nativeControls
+      contentFit="contain"
+      accessibilityLabel={p.label}
+    />
   );
 }

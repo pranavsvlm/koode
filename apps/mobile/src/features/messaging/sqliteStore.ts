@@ -96,6 +96,20 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
         }
       });
     },
+    async deleteMessages(ids) {
+      if (ids.length === 0) return;
+      const d = await open();
+      await d.withTransactionAsync(async () => {
+        for (const id of ids) await d.runAsync('DELETE FROM messages WHERE id = ?', id);
+      });
+    },
+    async removeConversation(id) {
+      const d = await open();
+      await d.withTransactionAsync(async () => {
+        await d.runAsync('DELETE FROM messages WHERE conversation_id = ?', id);
+        await d.runAsync('DELETE FROM conversations WHERE id = ?', id);
+      });
+    },
     async clear() {
       const d = await open();
       await d.execAsync('DELETE FROM conversations; DELETE FROM users; DELETE FROM messages;');
@@ -106,6 +120,8 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
     saveConversations: (list) => serial(() => store.saveConversations(list)),
     saveUsers: (list) => serial(() => store.saveUsers(list)),
     saveMessages: (list) => serial(() => store.saveMessages(list)),
+    deleteMessages: (ids) => serial(() => store.deleteMessages(ids)),
+    removeConversation: (id) => serial(() => store.removeConversation(id)),
     clear: () => serial(() => store.clear()),
   };
 }

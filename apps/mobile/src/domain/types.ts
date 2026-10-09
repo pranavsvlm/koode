@@ -14,17 +14,38 @@ export type Contact = {
 
 export type MessageStatus = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 
+/**
+ * Where an attachment's file is. Live attachments are downloaded on demand
+ * (with the user's credentials) and cached by `attachmentId`; sample data uses
+ * bundled `source`/`poster` images.
+ */
+export type MediaRef = {
+  /** Server attachment id. */
+  attachmentId?: string;
+  mimeType?: string;
+  /** A file already on this device (being sent). */
+  localUri?: string;
+  /** Video poster on this device (being sent). */
+  localPosterUri?: string;
+  /** Tiny base64 JPEG shown while the real image loads. */
+  preview?: string | null;
+  /** Video has a poster on the server. */
+  hasPoster?: boolean;
+  /** Upload progress (0–1) while sending. */
+  progress?: number;
+};
+
 export type Attachment =
-  | { kind: 'image'; source: ImageSourcePropType; width: number; height: number }
-  | {
+  | ({ kind: 'image'; source?: ImageSourcePropType; width: number; height: number } & MediaRef)
+  | ({
       kind: 'video';
-      poster: ImageSourcePropType;
+      poster?: ImageSourcePropType;
       width: number;
       height: number;
       durationSec: number;
-    }
-  | { kind: 'document'; name: string; sizeBytes: number; mimeType: string }
-  | { kind: 'voice'; durationSec: number; waveform: number[] };
+    } & MediaRef)
+  | ({ kind: 'document'; name: string; sizeBytes: number; mimeType: string } & MediaRef)
+  | ({ kind: 'voice'; durationSec: number; waveform: number[] } & MediaRef);
 
 export type Reaction = { emoji: string; userIds: string[] };
 
@@ -39,6 +60,8 @@ export type Message = {
   replyToId?: string;
   reactions: Reaction[];
   deleted?: boolean;
+  /** Group change ("Maya added Dan"), shown as a centred note, not a bubble. */
+  system?: string;
 };
 
 export type Conversation = {

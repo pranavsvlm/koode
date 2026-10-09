@@ -193,6 +193,39 @@ com.apple.Preferences`), and bring it back once the peer prints
   3. Makes another call, which the app answers from its notification.
   4. Makes a call that the native VoIP handler reports to CallKit.
 
+### Media and group check
+
+Generate test files (needs `ffmpeg` and Python with Pillow), copy four of them into
+the app's `Documents/e2e/`, and grant the permissions the Simulator can't tap:
+
+```sh
+mkdir -p /tmp/koode-media && cd /tmp/koode-media
+ffmpeg -f lavfi -i testsrc=size=640x360:rate=25 -f lavfi -i sine=frequency=440 -t 3 \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest clip.mp4
+ffmpeg -i clip.mp4 -frames:v 1 poster.jpg
+ffmpeg -f lavfi -i "sine=frequency=330:duration=2" -c:a aac -ac 1 voice.m4a
+# notes.pdf: any small PDF. gps.jpg: a JPEG with GPS EXIF. photo.jpg: any JPEG.
+DOCS="$(xcrun simctl get_app_container booted com.navoasis.koode.dev data)/Documents/e2e"
+mkdir -p "$DOCS" && cp gps.jpg clip.mp4 notes.pdf voice.m4a "$DOCS/"
+xcrun simctl privacy booted grant photos-add com.navoasis.koode.dev
+xcrun simctl privacy booted grant microphone com.navoasis.koode.dev
+
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=media EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/media-peer.mjs <maya code> <sam code> <path to Metro's log> /tmp/koode-media
+```
+
+1. "Maya" sends a photo, a video, a PDF and a voice message.
+2. The app downloads them, then sends its own files through the real pipeline:
+   processing, upload, send. It also records a voice message through the composer.
+3. The app reacts to Maya's photo, deletes its PDF for everyone, and saves her photo
+   to Photos.
+4. The app creates a group, adds "Sam", makes him admin, renames the group and
+   removes Maya.
+5. The peer checks everything from the server's side: EXIF/GPS removed, video
+   poster, documents served as downloads, reactions, deletion, and that Maya lost
+   access.
+
 ### Reviewing every screen without tapping
 
 On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep

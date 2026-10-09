@@ -5,6 +5,8 @@
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  // Hourly cleanup of attachments uploaded but never sent.
+  "triggers": { "crons": ["17 * * * *"] },
 
   // Non-secret configuration. Secrets go in .dev.vars locally and
   // `wrangler secret put` remotely — never in this file.

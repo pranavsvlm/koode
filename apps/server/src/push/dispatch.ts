@@ -1,5 +1,5 @@
 import type { Call, Message, PushData } from '@koode/shared';
-import { RING_TIMEOUT_MS } from '@koode/shared';
+import { attachmentLabel, RING_TIMEOUT_MS } from '@koode/shared';
 import { sendApns, type ApnsPush, type PushResult } from './apns';
 import { sendFcm, type FcmMessage } from './fcm';
 
@@ -120,10 +120,9 @@ export async function pushMessage(
 
   const group = conversation.kind === 'group';
   const title = group ? (conversation.title ?? 'Group') : senderName;
-  const text =
-    message.body.length > PREVIEW_CHARS
-      ? `${message.body.slice(0, PREVIEW_CHARS - 1)}…`
-      : message.body;
+  if (message.kind === 'system') return; // group changes show in the chat, not as alerts
+  const raw = message.body || (message.attachment ? attachmentLabel(message.attachment) : '');
+  const text = raw.length > PREVIEW_CHARS ? `${raw.slice(0, PREVIEW_CHARS - 1)}…` : raw;
   const data: PushData = {
     type: 'message',
     conversationId: message.conversationId,

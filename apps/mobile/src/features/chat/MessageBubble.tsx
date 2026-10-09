@@ -1,4 +1,3 @@
-import { Image } from 'expo-image';
 import { memo } from 'react';
 import { Pressable, useWindowDimensions, View, type ViewStyle } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -12,6 +11,7 @@ import { messagePreview } from '@/stores/chat';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import type { GroupPosition } from './items';
 import { MessageStatusIcon, statusLabel } from './MessageStatusIcon';
+import { BubbleMedia, fileTypeLabel } from './BubbleMedia';
 import { SwipeToReply } from './SwipeToReply';
 import { VoiceMessage } from './VoiceMessage';
 
@@ -190,8 +190,8 @@ export const MessageBubble = memo(function MessageBubble({
 
       {isVisual && (
         <View>
-          <Image
-            source={attachment.kind === 'image' ? attachment.source : attachment.poster}
+          <BubbleMedia
+            attachment={attachment}
             style={{
               width: MEDIA_MAX_WIDTH,
               height: Math.min(
@@ -199,9 +199,6 @@ export const MessageBubble = memo(function MessageBubble({
                 Math.max(160, (MEDIA_MAX_WIDTH * attachment.height) / attachment.width),
               ),
             }}
-            contentFit="cover"
-            transition={200}
-            accessibilityIgnoresInvertColors
           />
           {attachment.kind === 'video' && (
             <View className="absolute inset-0 items-center justify-center">
@@ -247,7 +244,9 @@ export const MessageBubble = memo(function MessageBubble({
               tone={outgoing ? 'inverse' : 'secondary'}
               style={outgoing ? { opacity: 0.8 } : undefined}
             >
-              {formatFileSize(attachment.sizeBytes)} · PDF
+              {attachment.progress !== undefined
+                ? `Sending ${Math.round(attachment.progress * 100)}%`
+                : `${formatFileSize(attachment.sizeBytes)} · ${fileTypeLabel(attachment.name, attachment.mimeType)}`}
             </Text>
           </View>
         </View>
@@ -255,11 +254,7 @@ export const MessageBubble = memo(function MessageBubble({
 
       {attachment?.kind === 'voice' && (
         <View className="px-3 pt-2">
-          <VoiceMessage
-            durationSec={attachment.durationSec}
-            waveform={attachment.waveform}
-            outgoing={outgoing}
-          />
+          <VoiceMessage attachment={attachment} outgoing={outgoing} />
         </View>
       )}
 

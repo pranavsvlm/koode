@@ -1,4 +1,4 @@
-import type { ConversationSummary, Message } from '@koode/shared';
+import type { AttachmentMeta, ConversationSummary, Message } from '@koode/shared';
 import { ApiClientError } from '@/lib/api';
 import {
   HEARTBEAT_MS,
@@ -84,6 +84,10 @@ function fakeServer() {
     receipts: [] as { id: string; body: unknown }[],
     sends: [] as string[],
     rejectSend: null as ApiClientError | null,
+    attachments: new Map<string, AttachmentMeta>(),
+    uploads: [] as { id: string; part: string; uri: string }[],
+    failUpload: null as ApiClientError | null,
+    expireUploads: false,
   };
   const ensureOnline = () => {
     if (!state.online) throw new ApiClientError('network', 'offline');
@@ -95,6 +99,7 @@ function fakeServer() {
       title: null,
       createdAt: 1,
       lastSeq: 0,
+      lastRev: 0,
       lastMessage: null,
       unreadCount: 0,
       members: [
@@ -109,6 +114,7 @@ function fakeServer() {
     senderId: string,
     body: string,
     id = `m-${Math.random()}`,
+    attachmentId: string | null = null,
   ) => {
     const list = state.messages.get(conversationId)!;
     const existing = list.find((m) => m.id === id);
@@ -118,14 +124,35 @@ function fakeServer() {
       id,
       conversationId,
       seq: c.lastSeq + 1,
+      rev: c.lastRev + 1,
       senderId,
+      kind: attachmentId ? 'attachment' : 'text',
       body,
       replyToId: null,
+      attachment: attachmentId ? state.attachments.get(attachmentId)! : null,
+      system: null,
+      reactions: [],
+      deletedAt: null,
       createdAt: 2_000_000 + c.lastSeq,
     };
     list.push(msg);
-    state.conversations.set(conversationId, { ...c, lastSeq: msg.seq, lastMessage: msg });
+    state.conversations.set(conversationId, {
+      ...c,
+      lastSeq: msg.seq,
+      lastRev: msg.rev,
+      lastMessage: msg,
+    });
     return msg;
+  };
+  /** Change an existing message on the server (new revision). */
+  const edit = (conversationId: string, id: string, patch: Partial<Message>) => {
+    const c = state.conversations.get(conversationId)!;
+    const list = state.messages.get(conversationId)!;
+    const i = list.findIndex((m) => m.id === id);
+    const next = { ...list[i]!, ...patch, rev: c.lastRev + 1 };
+    list[i] = next;
+    state.conversations.set(conversationId, { ...c, lastRev: next.rev });
+    return next;
   };
   const api: MessagingApi = {
     getAccessToken: async () => {
@@ -144,9 +171,13 @@ function fakeServer() {
       ensureOnline();
       return state.conversations.get(id)!;
     },
-    messages: async (id, { before, after, limit = 50 }) => {
+    messages: async (id, { before, after, changedSince, limit = 50 }) => {
       ensureOnline();
       const all = state.messages.get(id)!;
+      if (changedSince !== undefined) {
+        const rows = all.filter((m) => m.rev > changedSince).sort((a, b) => a.rev - b.rev);
+        return { messages: rows.slice(0, limit), hasMore: rows.length > limit };
+      }
       if (after !== undefined) {
         const rows = all.filter((m) => m.seq > after);
         return { messages: rows.slice(0, limit), hasMore: rows.length > limit };
@@ -158,7 +189,7 @@ function fakeServer() {
       ensureOnline();
       if (state.rejectSend) throw state.rejectSend;
       state.sends.push(body.body);
-      return post(id, ME, body.body, body.id);
+      return post(id, ME, body.body, body.id, body.attachmentId ?? null);
     },
     receipts: async (id, body) => {
       ensureOnline();
@@ -170,8 +201,57 @@ function fakeServer() {
       addConversation('c-new');
       return state.conversations.get('c-new')!;
     },
+    createAttachment: async (_id, body) => {
+      ensureOnline();
+      const meta: AttachmentMeta = {
+        id: `att-${state.attachments.size + 1}`,
+        kind: body.kind,
+        mimeType: body.mimeType,
+        sizeBytes: body.sizeBytes,
+        name: body.kind === 'document' ? body.name : null,
+        width: 'width' in body ? body.width : null,
+        height: 'height' in body ? body.height : null,
+        durationMs: 'durationMs' in body ? body.durationMs : null,
+        waveform: body.kind === 'voice' ? body.waveform : null,
+        preview: null,
+        hasThumbnail: false,
+      };
+      state.attachments.set(meta.id, meta);
+      return meta;
+    },
+    upload: async (attachmentId, part, file, onProgress) => {
+      ensureOnline();
+      if (state.expireUploads) {
+        state.expireUploads = false;
+        throw new ApiClientError('not_found', 'Attachment not found', 404);
+      }
+      if (state.failUpload) throw state.failUpload;
+      onProgress(0.5);
+      state.uploads.push({ id: attachmentId, part, uri: file.uri });
+      onProgress(1);
+    },
+    react: async (id, messageId, emoji) => {
+      ensureOnline();
+      const m = state.messages.get(id)!.find((x) => x.id === messageId)!;
+      const others = m.reactions.filter((r) => r.userId !== ME);
+      return edit(id, messageId, {
+        reactions: emoji ? [...others, { userId: ME, emoji }] : others,
+      });
+    },
+    deleteMessage: async (id, messageId) => {
+      ensureOnline();
+      return edit(id, messageId, { body: '', attachment: null, reactions: [], deletedAt: 1 });
+    },
+    renameGroup: async (id) => state.conversations.get(id)!,
+    addMembers: async (id) => state.conversations.get(id)!,
+    setRole: async (id) => state.conversations.get(id)!,
+    removeMember: async (id) => {
+      ensureOnline();
+      state.conversations.delete(id);
+      return {};
+    },
   };
-  return { state, api, addConversation, post };
+  return { state, api, addConversation, post, edit };
 }
 
 function setup(
@@ -424,7 +504,7 @@ describe('MessagingEngine', () => {
     await t.clock.advance(1000);
     t.socket().open();
     await flush();
-    expect(spy).toHaveBeenCalledWith('c1', { after: 1, limit: 50 });
+    expect(spy).toHaveBeenCalledWith('c1', { changedSince: 1, limit: 50 });
     expect(bodies(t.engine, 'c1')).toEqual(['old', 'missed while offline']);
   });
 
@@ -483,5 +563,220 @@ describe('MessagingEngine', () => {
     });
     await again.start();
     expect(bodies(again, 'c1')).toEqual(['cached']);
+  });
+});
+
+describe('MessagingEngine — edits, files and groups', () => {
+  it('catches up on reactions and deletions it missed, not just new messages', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const first = t.server.post('c1', MAYA, 'first');
+    t.server.post('c1', MAYA, 'second');
+    await t.engine.start();
+    await t.online();
+    t.socket().close();
+    t.server.edit('c1', first.id, { reactions: [{ userId: MAYA, emoji: '❤️' }] });
+    t.server.edit('c1', first.id, { body: '', deletedAt: 5 });
+    t.server.post('c1', MAYA, 'third');
+    await t.clock.advance(1000);
+    t.socket().open();
+    await flush();
+    const list = t.engine.getSnapshot().messages.c1!;
+    expect(list.map((m) => [m.body, m.deletedAt])).toEqual([
+      ['', 5],
+      ['second', null],
+      ['third', null],
+    ]);
+  });
+
+  it('skips changes to old messages it hasn’t loaded (no gaps in history)', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const msgs = Array.from({ length: 60 }, (_, i) => t.server.post('c1', MAYA, `m${i + 1}`));
+    await t.engine.start();
+    await t.online(); // newest 50: m11…m60
+    t.socket().close();
+    t.server.edit('c1', msgs[0]!.id, { reactions: [{ userId: MAYA, emoji: '👍' }] }); // m1, not loaded
+    t.server.edit('c1', msgs[59]!.id, { reactions: [{ userId: MAYA, emoji: '👍' }] }); // m60
+    await t.clock.advance(1000);
+    t.socket().open();
+    await flush();
+    const list = t.engine.getSnapshot().messages.c1!;
+    expect(list).toHaveLength(50);
+    expect(list.at(-1)!.reactions).toHaveLength(1);
+    await t.engine.loadOlder('c1');
+    expect(t.engine.getSnapshot().messages.c1![0]!.body).toBe('m1');
+  });
+
+  const photo = {
+    uri: 'file:///outbox/p.jpg',
+    posterUri: null,
+    request: {
+      kind: 'image' as const,
+      mimeType: 'image/jpeg' as const,
+      sizeBytes: 10,
+      width: 4,
+      height: 3,
+    },
+  };
+
+  it('uploads a file, then sends it, reporting progress', async () => {
+    const t = setup();
+    const uploaded = jest.fn();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    const local = t.engine.send('c1', 'look', null, photo);
+    expect(t.engine.getSnapshot().messages.c1![0]).toMatchObject({
+      kind: 'attachment',
+      state: 'pending',
+    });
+    await flush();
+    expect(t.server.state.uploads).toEqual([{ id: 'att-1', part: 'content', uri: photo.uri }]);
+    const sent = t.engine.getSnapshot().messages.c1![0]!;
+    expect(sent).toMatchObject({
+      id: local.id,
+      state: 'sent',
+      body: 'look',
+      attachment: { id: 'att-1' },
+    });
+    expect(t.engine.getSnapshot().progress).toEqual({});
+    expect(uploaded).not.toHaveBeenCalled(); // (not wired in this setup)
+  });
+
+  it('resumes an interrupted upload without creating it twice', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.server.state.failUpload = new ApiClientError('network', 'offline');
+    t.engine.send('c1', '', null, {
+      ...photo,
+      posterUri: 'file:///outbox/poster.jpg',
+      request: { ...photo.request },
+    });
+    await flush();
+    const pending = t.engine.getSnapshot().messages.c1![0]!;
+    expect(pending.state).toBe('pending');
+    expect(pending.upload).toMatchObject({ attachmentId: 'att-1', uploaded: false });
+    // Persisted, so a restart would resume from here too.
+    expect(t.store.dump().messages[0]!.upload?.attachmentId).toBe('att-1');
+
+    t.server.state.failUpload = null;
+    await t.engine.flushOutbox();
+    expect(t.server.state.attachments.size).toBe(1);
+    expect(t.engine.getSnapshot().messages.c1![0]!.state).toBe('sent');
+  });
+
+  it('starts an expired upload again', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.server.state.failUpload = new ApiClientError('network', 'offline');
+    t.engine.send('c1', '', null, photo);
+    await flush();
+    t.server.state.failUpload = null;
+    t.server.state.expireUploads = true; // the server cleaned it up meanwhile
+    await t.engine.flushOutbox();
+    expect(t.server.state.attachments.size).toBe(2);
+    expect(t.engine.getSnapshot().messages.c1![0]).toMatchObject({
+      state: 'sent',
+      attachment: { id: 'att-2' },
+    });
+  });
+
+  it('marks a refused file as failed and can discard it', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.server.state.failUpload = new ApiClientError('bad_request', 'File is too large', 400);
+    const m = t.engine.send('c1', '', null, photo);
+    await flush();
+    expect(t.engine.getSnapshot().messages.c1![0]!.state).toBe('failed');
+    t.engine.discard(m.id);
+    expect(t.engine.getSnapshot().messages.c1).toEqual([]);
+    expect(t.store.dump().messages).toEqual([]);
+  });
+
+  it('shows my reaction at once and keeps the server’s copy', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const m = t.server.post('c1', MAYA, 'hi');
+    await t.engine.start();
+    await t.online();
+    const pending = t.engine.react('c1', m.id, '👍');
+    expect(t.engine.getSnapshot().messages.c1![0]!.reactions).toEqual([
+      { userId: ME, emoji: '👍' },
+    ]);
+    await pending;
+    expect(t.engine.getSnapshot().messages.c1![0]!.rev).toBe(2);
+
+    t.server.state.online = false;
+    await expect(t.engine.react('c1', m.id, '❤️')).rejects.toThrow();
+    expect(t.engine.getSnapshot().messages.c1![0]!.reactions).toEqual([
+      { userId: ME, emoji: '👍' },
+    ]);
+  });
+
+  it('deletes for everyone and ignores stale copies arriving later', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.engine.send('c1', 'oops');
+    await flush();
+    const sent = t.engine.getSnapshot().messages.c1![0]!;
+    await t.engine.deleteForEveryone('c1', sent.id);
+    expect(t.engine.getSnapshot().messages.c1![0]).toMatchObject({ body: '', deletedAt: 1 });
+    // A late socket echo of the original must not bring the text back.
+    t.socket().receive({
+      type: 'message',
+      message: { ...t.server.state.messages.get('c1')![0], body: 'oops', deletedAt: null, rev: 1 },
+    });
+    expect(t.engine.getSnapshot().messages.c1![0]!.body).toBe('');
+  });
+
+  it('forgets a conversation when I leave or am removed', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    t.server.addConversation('c2');
+    t.server.post('c1', MAYA, 'hi');
+    await t.engine.start();
+    await t.online();
+    await t.engine.removeMember('c1', ME);
+    expect(t.engine.getSnapshot().conversations.map((c) => c.id)).toEqual(['c2']);
+    expect(t.engine.getSnapshot().messages.c1).toBeUndefined();
+
+    // Removed by someone else: the server says "conversation" and then 404s.
+    t.server.api.conversation = async () => {
+      throw new ApiClientError('not_found', 'Conversation not found', 404);
+    };
+    t.socket().receive({ type: 'conversation', conversationId: 'c2' });
+    await flush();
+    expect(t.engine.getSnapshot().conversations).toEqual([]);
+  });
+
+  it('doesn’t count group changes as unread', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    const base = t.server.post('c1', MAYA, 'x');
+    t.socket().receive({ type: 'message', message: base });
+    t.socket().receive({
+      type: 'message',
+      message: {
+        ...base,
+        id: 'sys',
+        seq: 2,
+        rev: 2,
+        kind: 'system',
+        body: '',
+        system: { action: 'renamed', actorId: MAYA, targetIds: [], title: 'New' },
+      },
+    });
+    expect(t.engine.getSnapshot().conversations[0]!.unreadCount).toBe(1);
   });
 });

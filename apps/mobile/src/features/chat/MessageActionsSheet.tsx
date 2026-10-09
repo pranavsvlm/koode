@@ -9,26 +9,55 @@ import { messagePreview } from '@/stores/chat';
 
 type Props = {
   message: Message | null;
+  /** Sender, or a group admin, of a message that was sent. */
+  canDeleteForEveryone: boolean;
   onClose: () => void;
   onReply: (m: Message) => void;
   onReact: (m: Message, emoji: string) => void;
-  onDelete: (m: Message) => void;
+  onDelete: (m: Message, scope: 'me' | 'everyone') => void;
+  onSave: (m: Message) => void;
+  onShare: (m: Message) => void;
+};
+
+type Action = {
+  icon: IconName;
+  label: string;
+  destructive?: boolean;
+  run: (m: Message) => void;
 };
 
 /** Long-press menu: quick reactions on top, actions below. */
-export function MessageActionsSheet({ message, onClose, onReply, onReact, onDelete }: Props) {
+export function MessageActionsSheet({
+  message,
+  canDeleteForEveryone,
+  onClose,
+  onReply,
+  onReact,
+  onDelete,
+  onSave,
+  onShare,
+}: Props) {
   const dialog = useDialog();
   const toast = useToast();
-  const mine = message?.senderId === ME;
+  const unsent = message?.status === 'sending' || message?.status === 'failed';
   const myReaction = message?.reactions.find((r) => r.userIds.includes(ME))?.emoji;
+  const kind = message?.attachment?.kind;
 
-  const actions: {
-    icon: IconName;
-    label: string;
-    destructive?: boolean;
-    run: (m: Message) => void;
-  }[] = [
-    { icon: 'reply', label: 'Reply', run: onReply },
+  const confirmDelete = (scope: 'me' | 'everyone') => async (m: Message) => {
+    const ok = await dialog.confirm({
+      title: scope === 'everyone' ? 'Delete for everyone?' : 'Delete for you?',
+      message:
+        scope === 'everyone'
+          ? 'The message and any file will be removed for everyone in this conversation.'
+          : 'This message will be removed from this device only.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (ok) onDelete(m, scope);
+  };
+
+  const actions: Action[] = [
+    ...(!unsent ? [{ icon: 'reply' as const, label: 'Reply', run: onReply }] : []),
     ...(message?.text
       ? [
           {
@@ -41,22 +70,23 @@ export function MessageActionsSheet({ message, onClose, onReply, onReact, onDele
           },
         ]
       : []),
-    {
-      icon: 'trash',
-      label: mine ? 'Delete for everyone' : 'Delete for me',
-      destructive: true,
-      run: async (m: Message) => {
-        const ok = await dialog.confirm({
-          title: mine ? 'Delete for everyone?' : 'Delete for you?',
-          message: mine
-            ? 'This message will be removed from the conversation for all members.'
-            : 'This message will be removed from this device.',
-          confirmLabel: 'Delete',
-          destructive: true,
-        });
-        if (ok) onDelete(m);
-      },
-    },
+    ...(kind === 'image' || kind === 'video'
+      ? [{ icon: 'download' as const, label: 'Save to Photos', run: onSave }]
+      : []),
+    ...(kind ? [{ icon: 'share' as const, label: 'Share', run: onShare }] : []),
+    ...(canDeleteForEveryone && !unsent
+      ? [
+          {
+            icon: 'trash' as const,
+            label: 'Delete for Everyone',
+            destructive: true,
+            run: confirmDelete('everyone'),
+          },
+        ]
+      : []),
+    unsent
+      ? { icon: 'trash', label: 'Cancel Sending', destructive: true, run: (m) => onDelete(m, 'me') }
+      : { icon: 'trash', label: 'Delete for Me', destructive: true, run: confirmDelete('me') },
   ];
 
   return (
@@ -66,33 +96,35 @@ export function MessageActionsSheet({ message, onClose, onReply, onReact, onDele
           <Text variant="footnote" tone="secondary" numberOfLines={2} className="px-2 text-center">
             {messagePreview(message)}
           </Text>
-          <View className="flex-row justify-between rounded-full bg-fill px-2 py-1.5">
-            {QUICK_REACTIONS.map((emoji, i) => (
-              <Animated.View
-                key={emoji}
-                entering={ZoomIn.delay(i * 30)
-                  .springify()
-                  .damping(14)}
-              >
-                <Pressable
-                  onPress={() => {
-                    haptics.selection();
-                    onReact(message, emoji);
-                    onClose();
-                  }}
-                  accessibilityRole="button"
-                  accessibilityLabel={`React with ${emoji}`}
-                  accessibilityState={{ selected: myReaction === emoji }}
-                  className={cn(
-                    'h-11 w-11 items-center justify-center rounded-full',
-                    myReaction === emoji && 'bg-accent/20',
-                  )}
+          {!unsent && (
+            <View className="flex-row justify-between rounded-full bg-fill px-2 py-1.5">
+              {QUICK_REACTIONS.map((emoji, i) => (
+                <Animated.View
+                  key={emoji}
+                  entering={ZoomIn.delay(i * 30)
+                    .springify()
+                    .damping(14)}
                 >
-                  <Text style={{ fontSize: 26, lineHeight: 32 }}>{emoji}</Text>
-                </Pressable>
-              </Animated.View>
-            ))}
-          </View>
+                  <Pressable
+                    onPress={() => {
+                      haptics.selection();
+                      onReact(message, emoji);
+                      onClose();
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`React with ${emoji}`}
+                    accessibilityState={{ selected: myReaction === emoji }}
+                    className={cn(
+                      'h-11 w-11 items-center justify-center rounded-full',
+                      myReaction === emoji && 'bg-accent/20',
+                    )}
+                  >
+                    <Text style={{ fontSize: 26, lineHeight: 32 }}>{emoji}</Text>
+                  </Pressable>
+                </Animated.View>
+              ))}
+            </View>
+          )}
           <View className="overflow-hidden rounded-xl bg-surface">
             {actions.map((a, i) => (
               <Pressable

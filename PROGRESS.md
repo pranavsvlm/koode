@@ -8,12 +8,144 @@
 | 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator    |
 | 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator    |
 | 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator          |
-| 7     | Media and group features | ⏳ Awaiting approval                                   |
-| 8     | Security and E2EE        | —                                                      |
+| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator         |
+| 8     | Security and E2EE        | ⏳ Awaiting approval                                   |
 | 9     | Performance and testing  | —                                                      |
 | 10    | Builds and distribution  | —                                                      |
 
 **E2EE status: not implemented.** Traffic is protected by TLS only.
+
+---
+
+## Phase 7: Media and group features (2026-10-09)
+
+Photos, videos, documents and voice messages work end to end. They are stored in a
+**private R2 bucket** (local Miniflare R2 in development: no account, no cost) behind
+authorized upload and download routes. Reactions, replies and "delete for everyone"
+are server-backed and sync across devices, and groups can be administered.
+**Files and messages are not end-to-end encrypted yet (Phase 8).**
+
+### Delivered
+
+- **Server:**
+  - **Migration `0006`:** rebuilds `messages` (kinds `text`/`attachment`/`system`,
+    revisions, tombstones), and adds `attachments` and `reactions`.
+  - **Attachments:**
+    - per-kind type and size limits;
+    - uploads streamed to R2 with an exact `Content-Length` check;
+    - video posters;
+    - members-only reads with `Range` support;
+    - documents always served as downloads (`octet-stream`, `nosniff`, sandbox CSP);
+    - single use per upload, by its uploader, in its conversation;
+    - hourly cron cleanup of unsent uploads; files deleted with their message.
+  - **Reactions:** one per person per message.
+  - **Delete for everyone:** by the sender or a group admin. Text, file and reactions
+    are erased, leaving a marker.
+  - **Revisions:** every change bumps the message's revision; `changedSince`
+    catch-up returns new and changed messages.
+  - **Group administration:** rename, add (≤ 64 members), remove, promote/demote,
+    leave. A group always keeps an admin. Each change is a system message, not unread
+    and never pushed.
+  - **Notifications:** attachment pushes say "📷 Photo" and the like.
+- **App:**
+  - **Pickers:** the attach sheet has the real camera, photo library (multi-select,
+    up to 10; HEIC arrives as JPEG) and document picker.
+  - **Processing:** photos are re-encoded (≤ 2048 px, **EXIF/GPS removed**); videos
+    get a poster; photos and posters get tiny inline previews.
+  - **Outbox:** upload-aware and resumable (create → poster → upload → send; each step
+    persisted), with progress in the bubble. An expired upload restarts; a refused
+    file can be cancelled.
+  - **Media cache:** authenticated downloads cached by attachment id, deduplicated;
+    the sender's copy is reused. Cleared at sign-out.
+  - **Bubbles:**
+    - photos and video posters with placeholders;
+    - document cards with the real file type;
+    - voice messages with real playback (expo-audio).
+  - **Media viewer:** plays videos (expo-video); Save to Photos (add-only access);
+    Share.
+  - **Documents:** they open through the share sheet ("Open in…", "Save to Files").
+  - **Voice recording:** in the composer: tap to record (mono AAC, live level,
+    waveform), then send or cancel. It can't start during a call.
+  - **Message actions:** Reply, Copy, Save to Photos, Share, Delete for Everyone
+    (sender or group admin), Delete for Me / Cancel Sending.
+  - **Sync:** reactions and deletion are server-backed with instant feedback, and
+    catch-up includes edits.
+  - **Group info:** rename, add members, member actions (make or remove admin,
+    remove), and leave. Removed or leaving users' devices drop the chat. System notes
+    appear in the chat ("You added Sam Lee").
+- **Dev tooling:**
+  - the `media` tour mode and `scripts/media-peer.mjs`;
+  - development handles so the tour drives the composer's own record and send
+    handlers.
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                                                                   | Result                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| TypeScript, ESLint, Prettier (all packages)                                                                                                                                                                                                                                                                             | ✅ Pass                 |
+| Shared schema tests                                                                                                                                                                                                                                                                                                     | ✅ 31/31                |
+| Push relay tests                                                                                                                                                                                                                                                                                                        | ✅ 6/6                  |
+| Server tests (19 new: upload validation, exact-size storage, private-until-sent, members-only reads, Range, documents as downloads, video posters, send-once rules, cron cleanup, reactions, delete-for-everyone erasing files, revision catch-up, group create/rename/add/remove/leave/promote/demote, admin deletion) | ✅ 90/90                |
+| A deliberately removed admin check makes 3 group tests fail                                                                                                                                                                                                                                                             | ✅                      |
+| Mobile tests (engine: edit catch-up, gap-free skipping, upload pipeline with resume/expiry/refusal, optimistic reactions, stale-copy protection, leaving; store: attachment mapping, grouped reactions, system text)                                                                                                    | ✅ 176/176              |
+| Native iOS build with the media modules                                                                                                                                                                                                                                                                                 | ✅                      |
+| **Media and group E2E on the Simulator: app + two peer accounts, local Worker and R2** (repeated runs)                                                                                                                                                                                                                  | ✅ Logs and screenshots |
+| Maya's photo, video (with poster), PDF and voice arrive, render and download byte-for-byte                                                                                                                                                                                                                              | ✅                      |
+| The app sends a photo, video, PDF and voice file through the real pipeline; all reach "sent"                                                                                                                                                                                                                            | ✅                      |
+| The photo the app sent: JPEG, **GPS position and camera make removed**, inline preview present                                                                                                                                                                                                                          | ✅                      |
+| The video the app sent: poster uploaded and served; documents served as `octet-stream` downloads under their real name                                                                                                                                                                                                  | ✅                      |
+| **Voice recorded through the composer** (Simulator microphone): 3.2 s AAC (`ftyp`), 28-point waveform                                                                                                                                                                                                                   | ✅                      |
+| Reactions both ways; delete-for-everyone → marker in the app, file 404 for the other person                                                                                                                                                                                                                             | ✅                      |
+| Save to Photos (add-only access) succeeds; the viewer shows the photo and plays the video                                                                                                                                                                                                                               | ✅                      |
+| Group: create, add Sam, make admin, rename, remove Maya → system notes in the chat, Maya gets 404, Sam is admin                                                                                                                                                                                                         | ✅                      |
+
+Bugs found by these tests and fixed:
+
+- **Sender's own media:** a bubble's download raced with the sender's own file
+  moving into the cache; the move failed, leaving a stale partial file and a blank
+  bubble.
+- **Voice duration:** voice bubbles showed the player's rounded-down duration.
+- **Test identities:** the E2E tour picked an old test account by display name; it
+  now identifies people by its own conversations.
+
+### Not verified
+
+- **Tapping the pickers:** the camera, photo library and document picker UIs were
+  not driven (the Simulator can't be tapped, and has no camera). Files entered the
+  same pipeline right after the picker.
+- **The share sheet:** Share / "Open in…" opening, and choosing another app.
+- **Hearing playback:** voice and video sound, and voice playback controls, were not
+  exercised.
+- **Large and slow transfers:** files near the 100 MB limit, slow or flaky
+  networks, and resuming an interrupted upload on a real network (the resume logic
+  is unit-tested).
+- **Real phones and Android:** real photos (HEIC, Live Photos), Android pickers and
+  storage permissions, and a deployed R2 bucket.
+
+### Known issues and limitations
+
+- **Not end-to-end encrypted:** files are encrypted in transit only; the server and
+  the device caches hold plaintext.
+- **Video sending:**
+  - videos are sent at the picker's export quality, with no extra compression;
+  - the viewer downloads the whole video before playing (no streaming yet, although
+    the server supports ranges).
+- **Device-only:** pin, mute and "delete for me".
+- **Not yet supported:** editing messages, forwarding, group photos and
+  descriptions.
+- **Media and removed members:** when someone is removed from a group, the files
+  already downloaded to their device stay there.
+- **Android permissions:** `@config-plugins/react-native-webrtc` and expo-media-library
+  add storage permissions; review them in Phase 10.
+
+### Manual configuration required
+
+- **Development (done on this Mac):**
+  - migration 0006 is applied;
+  - the native app has been rebuilt;
+  - `ffmpeg` is used only to generate test files.
+- **Before real use (your approval):** a Cloudflare R2 bucket (`koode-media`).
+  Enabling R2 requires a payment method on the Cloudflare account.
 
 ---
 

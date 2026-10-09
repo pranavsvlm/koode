@@ -49,16 +49,50 @@ The signed message is
 
 ## Messaging
 
-| Method | Path                             | Auth | Purpose                                                                                                         |
-| ------ | -------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------- |
-| GET    | `/v1/users`                      | 🔒   | Directory of other active members: `{id, username, displayName, about}`                                         |
-| GET    | `/v1/conversations`              | 🔒   | Your conversations: members, receipt positions, last message, unread count                                      |
-| POST   | `/v1/conversations`              | 🔒   | `{kind: 'direct', userId}` (returns the existing chat if there is one) or `{kind: 'group', title, memberIds}`   |
-| GET    | `/v1/conversations/:id`          | 🔒   | One conversation (404 if you're not a member)                                                                   |
-| GET    | `/v1/conversations/:id/messages` | 🔒   | `?before=<seq>` (default: newest) or `?after=<seq>`, plus `limit` (≤100) → `{messages (oldest first), hasMore}` |
-| POST   | `/v1/conversations/:id/messages` | 🔒   | `{id: <uuid v4>, body (≤4000), replyToId?}` → message with `seq` (201). Idempotent per id.                      |
-| POST   | `/v1/conversations/:id/receipts` | 🔒   | `{delivered?, read?, shareRead = true}`                                                                         |
-| GET    | `/v1/realtime`                   | 🔒   | WebSocket upgrade (the bearer token goes in the `Authorization` header)                                         |
+| Method | Path                                                 | Auth | Purpose                                                                                                                                                           |
+| ------ | ---------------------------------------------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/users`                                          | 🔒   | Directory of other active members: `{id, username, displayName, about}`                                                                                           |
+| GET    | `/v1/conversations`                                  | 🔒   | Your conversations: members, receipt positions, last message, unread count                                                                                        |
+| POST   | `/v1/conversations`                                  | 🔒   | `{kind: 'direct', userId}` (returns the existing chat if there is one) or `{kind: 'group', title, memberIds}`                                                     |
+| GET    | `/v1/conversations/:id`                              | 🔒   | One conversation (404 if you're not a member)                                                                                                                     |
+| GET    | `/v1/conversations/:id/messages`                     | 🔒   | `?before=<seq>` (default: newest), `?after=<seq>` or `?changedSince=<rev>` (new _and_ changed messages, by revision), plus `limit` (≤100) → `{messages, hasMore}` |
+| POST   | `/v1/conversations/:id/messages`                     | 🔒   | `{id: <uuid v4>, body (≤4000), replyToId?, attachmentId?}`: body may be empty with an attachment → message (201). Idempotent per id.                              |
+| PUT    | `/v1/conversations/:id/messages/:messageId/reaction` | 🔒   | `{emoji}` sets my reaction (one per person), `{emoji: null}` removes it → message                                                                                 |
+| DELETE | `/v1/conversations/:id/messages/:messageId`          | 🔒   | Delete for everyone (sender, or a group admin) → message with `deletedAt`, empty body, no attachment                                                              |
+| PATCH  | `/v1/conversations/:id`                              | 🔒   | `{title}`: rename a group (admins)                                                                                                                                |
+| POST   | `/v1/conversations/:id/members`                      | 🔒   | `{userIds}`: add people (admins; up to 64 members)                                                                                                                |
+| PATCH  | `/v1/conversations/:id/members/:userId`              | 🔒   | `{role: 'admin' \| 'member'}` (admins; never the last admin)                                                                                                      |
+| DELETE | `/v1/conversations/:id/members/:userId`              | 🔒   | Remove someone (admins), or your own id to leave                                                                                                                  |
+| POST   | `/v1/conversations/:id/receipts`                     | 🔒   | `{delivered?, read?, shareRead = true}`                                                                                                                           |
+| GET    | `/v1/realtime`                                       | 🔒   | WebSocket upgrade (the bearer token goes in the `Authorization` header)                                                                                           |
+
+A **message** is `{id, conversationId, seq, rev, senderId, kind: 'text' | 'attachment' | 'system',
+body, replyToId, attachment, system, reactions: [{userId, emoji}], deletedAt, createdAt}`.
+`system` messages (`{action, actorId, targetIds, title}`) record group changes:
+`created`, `renamed`, `added`, `removed`, `left`, `promoted`, `demoted`.
+Reactions and deletions arrive as `message` events with the updated message.
+
+## Attachments
+
+| Method | Path                                | Auth | Purpose                                                                                      |
+| ------ | ----------------------------------- | ---- | -------------------------------------------------------------------------------------------- |
+| POST   | `/v1/conversations/:id/attachments` | 🔒   | Start an upload (members): `{kind, mimeType, sizeBytes, …}` → attachment metadata (201)      |
+| PUT    | `/v1/attachments/:id/content`       | 🔒   | The file (uploader, until sent). `Content-Length` must equal `sizeBytes`                     |
+| PUT    | `/v1/attachments/:id/thumbnail`     | 🔒   | Video poster, `image/jpeg` ≤ 512 KB (uploader, until sent)                                   |
+| GET    | `/v1/attachments/:id/content`       | 🔒   | The file (members once sent, uploader before). Supports `Range`. Documents download as files |
+| GET    | `/v1/attachments/:id/thumbnail`     | 🔒   | Video poster                                                                                 |
+
+Kinds and their fields:
+
+| Kind     | Fields                                           |
+| -------- | ------------------------------------------------ |
+| image    | `width`, `height`, `preview?` (tiny base64 JPEG) |
+| video    | `width`, `height`, `durationMs`, `preview?`      |
+| voice    | `durationMs`, `waveform` (≤ 64 values in 0–1)    |
+| document | `name`                                           |
+
+Limits: image 20 MB, video and document 100 MB, voice 15 MB. Unsent uploads are
+deleted after 24 hours.
 
 ## Calls
 
