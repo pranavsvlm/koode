@@ -10,12 +10,121 @@
 | 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator                              |
 | 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator                             |
 | 8     | Security and E2EE        | ✅ Complete on iOS; interop E2E on the Simulator; Android E2EE not written |
-| 9     | Performance and testing  | ⏳ Awaiting approval                                                       |
-| 10    | Builds and distribution  | —                                                                          |
+| 9     | Performance and testing  | ✅ Complete; 53 device checks on the iOS 27 Simulator                      |
+| 10    | Builds and distribution  | ⏳ In progress                                                             |
 
 **E2EE status:** messages, attachments, reactions and calls are end-to-end encrypted
 with libsignal on **iOS**, verified against Signal's Node implementation. Not
 independently reviewed. **Android has no E2EE module yet**, so it can't send.
+
+---
+
+## Phase 9: Performance and testing (2026-10-10)
+
+The app was measured, optimized where the measurements showed real costs, and tested
+on the Simulator:
+
+- every earlier device flow was rebuilt on a shared encrypted test peer and rerun;
+- a new resilience suite covers offline use, the background, permissions and
+  account recovery.
+
+### Optimizations (measured)
+
+| Area                  | Change                                                                                                                                                                                                                        | Before → after                                                                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Startup**           | The cache read uses one index range per chat (instead of ranking every cached message) and loads the newest 50 per chat (instead of 300). Scrolling back reads older messages from the cache first, so it also works offline. | 100k-message cache, on the Simulator (Hermes and iOS SQLite): **150.6 ms → 14 ms**; 15,000 → 2,500 messages parsed and held in memory                                    |
+| **Chat rendering**    | The chat store keeps the same objects for unchanged chats, messages, contacts and conversations. Memoized bubbles and rows skip re-rendering; a typing event changes nothing on screen.                                       | Per typing event, 50 chats × 300 messages: **4.1 ms → 0.05 ms** in Node (0.15 ms on the Simulator); a new message re-renders only its own bubble                         |
+| **Database (server)** | **Conversation summaries:** the last message is found through `conversations.last_message_seq` (migration `0008`) instead of a correlated `MAX` over every message.                                                           | 30 chats × 5,000 messages: **48 ms → 0.02 ms** per conversation list (each reconnect)                                                                                    |
+|                       | **Ringing calls:** expiring stale ringing calls (run on every call request) uses a partial index.                                                                                                                             | Was a full scan of `calls`                                                                                                                                               |
+|                       | All other hot queries were checked with `EXPLAIN QUERY PLAN`                                                                                                                                                                  | All already indexed                                                                                                                                                      |
+| **Memory (files)**    | Encryption and decryption stream in 1 MiB chunks, with an incremental SHA-256, a temporary file and an atomic move.                                                                                                           | 100 MB file: about **+18 MB** peak (measured; the old code held the file and its ciphertext in memory, at least +200 MB). Encrypt 124 ms, decrypt 92 ms on the Simulator |
+| **Image loading**     | Decrypted images are cached in memory only (`cachePolicy="memory"`). expo-image's caches are cleared at sign-out.                                                                                                             | Removes a second, **plaintext** disk copy that sign-out didn't erase (a privacy fix)                                                                                     |
+| **Battery**           | After 30 s in the background (never during a call) the WebSocket closes and every timer stops; resuming reconnects and catches up.                                                                                            | Background: no heartbeat (every 25 s) and no reconnect timers (verified in a unit test and on the Simulator)                                                             |
+| **Network**           | Sends to a member with no keys are refused up front instead of producing unreadable messages.                                                                                                                                 | Previously, a message encrypted for nobody was accepted                                                                                                                  |
+| **Offline**           | Cache-first history and the existing outbox.                                                                                                                                                                                  | Verified on the Simulator with the server stopped                                                                                                                        |
+
+### Delivered
+
+- **`apps/server/scripts/lib/peer.mjs`:** a shared test peer.
+  - A real account with Signal's Node library (keys, sessions, decrypt-once
+    history, encrypted texts, files, reactions and calls).
+  - Call media through LiveKit's Node SDK with frame encryption.
+  - Metro-log coordination and PASS/FAIL reporting.
+- **Peers rewritten** on it, now with explicit checks: `peer.mjs`,
+  `call-peer.mjs` (the `lk` CLI couldn't do frame encryption), `push-peer.mjs`,
+  `media-peer.mjs` and `e2ee-peer.mjs`.
+- **New:**
+  - `resilience-peer.mjs` with the app's `resilience` tour;
+  - the `perf` tour (on-device measurements);
+  - the call tour reports decoded audio and encryption.
+- **Fixes:**
+  - **Unreadable messages:** a message sent before a recipient published keys was
+    accepted for nobody. It is now refused (409 `unkeyed`), and the app shows it as
+    failed.
+  - **Lost reactions:** reactions could disappear for messages whose reaction
+    messages weren't loaded. They're now recorded incrementally on the target (and
+    in the cache).
+  - **Undoing a failed reaction:** a failed reaction now puts back the previous one.
+  - **Plaintext image cache** (see Image loading above).
+  - **Late "background" events:** the suspend timer re-checks the app state, so a
+    late event can't disconnect a visible app.
+  - **`randomKey`** now checks the random generator's result.
+- Migration `0008_performance.sql`.
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                                                                                                                                                                               | Result                |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `pnpm check` (types, lint, Prettier, all tests)                                                                                                                                                                                                                                                                                                                                                                                     | ✅ Pass               |
+| Shared / push relay / server / mobile unit and integration tests                                                                                                                                                                                                                                                                                                                                                                    | ✅ 33 / 6 / 103 / 197 |
+| New unit tests:<br>• server: recipients without keys;<br>• engine: cache-first scroll-back offline, reactions on cache-only messages, restoring a failed reaction, suspend/resume;<br>• store: object identity across typing and new messages, status updates                                                                                                                                                                       | ✅                    |
+| Native iOS build (streaming file crypto)                                                                                                                                                                                                                                                                                                                                                                                            | ✅                    |
+| **Device suites on the iOS 27 Simulator, rerun after all optimizations**                                                                                                                                                                                                                                                                                                                                                            | ✅ **53/53**          |
+| **Messaging:** encrypted both ways, read receipt, typing                                                                                                                                                                                                                                                                                                                                                                            | ✅ 3/3                |
+| **Calling:** the app answers an encrypted call (decrypts the key on `accept`), decodes the caller's encrypted audio, shows "End-to-end encrypted"; mute; hang-up; declined call-back; history                                                                                                                                                                                                                                       | ✅ 7/7                |
+| **Notifications:**<br>• background message and calls, with no message text in any notification;<br>• answering from the notification (key decrypted);<br>• CallKit path;<br>• a message while the app was closed                                                                                                                                                                                                                    | ✅ 5/5                |
+| **Media and groups:** four encrypted file kinds both ways; GPS and camera make removed; encrypted poster; reactions; delete-for-everyone erasing ciphertext and file; recorded voice; group admin changes                                                                                                                                                                                                                           | ✅ 11/11              |
+| **E2EE interoperability** with Signal's Node implementation                                                                                                                                                                                                                                                                                                                                                                         | ✅ 17/17              |
+| **Resilience:**<br>• server stopped: text and photo queued, then sent by themselves once it returned (about 20 s) and decrypted by the peer;<br>• suspended after 30 s in the background, caught up on return;<br>• Photos denied → a clear message;<br>• sign-out erased the chats;<br>• recovery → new device 2: new messages decrypt, three older ones "not available on this device", and its own message decrypts for the peer | ✅ 10/10              |
+| Performance measurements on the Simulator (table above)                                                                                                                                                                                                                                                                                                                                                                             | ✅                    |
+
+### Not verified
+
+- **Real devices:**
+  - battery drain over time;
+  - thermal behaviour;
+  - cold-start time on an iPhone;
+  - all of Android (no SDK here).
+
+  The Simulator runs on the Mac's CPU, and its background behaviour differs (the JS
+  keeps running).
+
+- **Network switching** (Wi-Fi ↔ cellular), packet loss and slow networks. The
+  Simulator shares the Mac's network; a server outage stood in for losing the
+  network.
+- **Permission prompts:** the Simulator can't tap Allow/Deny, so permissions were set
+  with `simctl`. The microphone prompt, the camera and notification denial weren't
+  driven.
+- **The app → peer audio direction** (the Simulator microphone is silent), and
+  **video** (no camera).
+- **Release-build performance:** these numbers come from a Debug build with Metro.
+
+### Known issues and limitations
+
+- **Large chats:** the chat screen uses React Native's FlatList (virtualized). It
+  wasn't profiled with thousands of messages on a device.
+- **Older history on a new device:** after a recovery it loads on scroll and shows
+  "Not available on this device" (by design: those messages were encrypted for the
+  old device).
+- **Upload progress:** a file sent while offline shows as sending until the server
+  is back. Uploads restart the file if the connection drops mid-transfer (resumable
+  by step, not by byte).
+
+### Manual configuration required
+
+- **Migration:** apply `0008_performance.sql` with
+  `pnpm --filter @koode/server db:migrate:local` (remotely, only with approval).
+- **Rebuild the iOS app:** the native module changed.
 
 ---
 

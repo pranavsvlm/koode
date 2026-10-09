@@ -193,8 +193,8 @@ export async function loadSummaries(
     db
       .prepare(
         `${MESSAGE_SELECT}
-         WHERE m.conversation_id IN (${mine}) AND m.seq = (
-           SELECT MAX(seq) FROM messages WHERE conversation_id = m.conversation_id AND kind != 'reaction')`,
+         JOIN conversations c ON c.id = m.conversation_id AND m.seq = c.last_message_seq
+         WHERE c.id IN (${mine})`,
       )
       .bind(userId),
     db

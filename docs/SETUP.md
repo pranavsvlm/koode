@@ -254,6 +254,57 @@ The peer prints `PASS`/`FAIL` per check and exits non-zero on any failure:
 The Simulator's microphone is silent, so the app → peer audio direction can't be
 judged there.
 
+### Resilience check (offline, background, recovery)
+
+```sh
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=resilience EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/resilience-peer.mjs <maya code> <path to Metro's log> /tmp/koode-media
+```
+
+The tour logs `[tour-res] go-offline`, `go-online` and `background-now`; act on them
+by hand or with a runner:
+
+- stop the local Worker on `go-offline`, and restart it on `go-online`;
+- send the app to the home screen for about 45 s on `background-now`
+  (`xcrun simctl launch booted com.apple.Preferences`, then relaunch Koode).
+
+Revoke Photos access first (`xcrun simctl privacy booted revoke photos-add
+com.navoasis.koode.dev`).
+
+The run covers:
+
+- the offline outbox (a text and a photo);
+- suspending in the background, then catching up on return;
+- a denied permission;
+- signing out, then recovering the account as a new device.
+
+### Performance measurements
+
+`EXPO_PUBLIC_DEV_TOUR=perf` runs on-device measurements and logs `[tour-perf] …`:
+
+- the start-up cache read on a 100,000-message scratch database;
+- the chat store's cost per typing event and per new message;
+- encrypting and decrypting a 100 MB file.
+
+Sample the app's memory meanwhile with `ps -o rss= -p $(pgrep -f
+KoodeDev.app/KoodeDev)`.
+
+### Device test peers
+
+All peers share `apps/server/scripts/lib/peer.mjs`: a real account with Signal's Node
+library for encryption, and LiveKit's Node SDK with frame encryption for calls. Each
+prints `PASS`/`FAIL` lines and exits non-zero on any failure.
+
+| Tour mode    | Peer                  | Covers                                                    |
+| ------------ | --------------------- | --------------------------------------------------------- |
+| `messaging`  | `peer.mjs`            | Encrypted chat both ways, receipts, typing                |
+| `calls`      | `call-peer.mjs`       | Answering an encrypted call, decoded audio, mute, decline |
+| `push`       | `push-peer.mjs`       | Notifications in the background and when closed, CallKit  |
+| `media`      | `media-peer.mjs`      | Encrypted files both ways, EXIF removal, groups           |
+| `e2ee`       | `e2ee-peer.mjs`       | Interoperability with Signal's implementation             |
+| `resilience` | `resilience-peer.mjs` | Offline, background, permissions, account recovery        |
+
 ### Reviewing every screen without tapping
 
 On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep

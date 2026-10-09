@@ -23,6 +23,7 @@ import {
   type LocalMessage,
   type LocalUpload,
   type MessagingStore,
+  type ReactionMark,
   type SealedFile,
   type Snapshot,
 } from './types';
@@ -291,6 +292,7 @@ export class MessagingEngine {
   /** Server messages are opened in arrival order, one batch at a time. */
   private inbox: Promise<unknown> = Promise.resolve();
   private myDevice: number | null = null;
+  private suspended = false;
 
   constructor(deps: EngineDeps) {
     this.deps = {
@@ -385,9 +387,40 @@ export class MessagingEngine {
     });
   }
 
+  /**
+   * The app has been in the background for a while: close the connection
+   * and stop every timer (pushes cover the background) until `resume()`.
+   */
+  suspend(): void {
+    if (!this.running || this.suspended) return;
+    this.suspended = true;
+    if (__DEV__) console.log('[messaging] suspended');
+    if (this.pendingAcks.size) {
+      this.clearTimer('ackTimer');
+      void this.flushAcks();
+    }
+    this.clearTimer('reconnectTimer');
+    this.clearTimer('heartbeatTimer');
+    this.clearTimer('pongTimer');
+    this.clearTimer('typingTimer');
+    const s = this.socket;
+    this.socket = null;
+    if (s) {
+      s.onclose = null;
+      s.close();
+    }
+    this.emit({ connection: 'offline' });
+  }
+
   /** App returned to the foreground or the network came back. */
   resume(): void {
     if (!this.running) return;
+    if (this.suspended) {
+      this.suspended = false;
+      this.attempt = 0;
+      void this.connect();
+      return;
+    }
     if (this.snapshot.connection === 'online') {
       void this.sync();
     } else {
@@ -407,7 +440,7 @@ export class MessagingEngine {
   // ——— Connection ———
 
   private async connect(): Promise<void> {
-    if (!this.running || this.socket) return;
+    if (!this.running || this.suspended || this.socket) return;
     this.emit({ connection: 'connecting' });
     let token: string;
     try {
@@ -421,7 +454,7 @@ export class MessagingEngine {
       this.scheduleReconnect();
       return;
     }
-    if (!this.running || this.socket) return;
+    if (!this.running || this.suspended || this.socket) return;
 
     const socket = this.deps.connect(token);
     this.socket = socket;
@@ -444,7 +477,7 @@ export class MessagingEngine {
 
   /** Exponential backoff with jitter: ~1s, 2s, 4s … capped at 30s. */
   private scheduleReconnect() {
-    if (!this.running || this.reconnectTimer !== null) return;
+    if (!this.running || this.suspended || this.reconnectTimer !== null) return;
     const base = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** this.attempt);
     const delay = Math.round(base * (0.5 + this.deps.random() * 0.5));
     this.attempt += 1;
@@ -606,14 +639,26 @@ export class MessagingEngine {
     }
   }
 
-  /** Older history for a conversation (scrolling up). */
+  /**
+   * Older history for a conversation (scrolling up): from this device's cache
+   * when it has it (no network, works offline), otherwise from the server.
+   */
   async loadOlder(conversationId: string): Promise<void> {
-    if (this.snapshot.hasMore[conversationId] === false) return;
     const local = this.snapshot.messages[conversationId] ?? [];
     const minSeq = local.reduce(
       (m, x) => (x.seq !== null ? Math.min(m, x.seq) : m),
       Number.MAX_SAFE_INTEGER,
     );
+    if (minSeq !== Number.MAX_SAFE_INTEGER) {
+      const cached = await this.deps.store
+        .olderMessages(conversationId, minSeq, PAGE)
+        .catch(() => [] as LocalMessage[]);
+      if (cached.length) {
+        this.ingest(cached.map(normalizeMessage));
+        return;
+      }
+    }
+    if (this.snapshot.hasMore[conversationId] === false) return;
     try {
       const page = await this.deps.api.messages(conversationId, {
         before: minSeq === Number.MAX_SAFE_INTEGER ? undefined : minSeq,
@@ -666,7 +711,9 @@ export class MessagingEngine {
   /** A server message → the local copy, decrypting it if this device hasn't yet. */
   private async open(m: Message, local: LocalMessage | undefined): Promise<LocalMessage> {
     if (m.encryption === 'none') return plaintext(m);
-    const keep = local ? { reactions: local.reactions, upload: undefined } : { reactions: [] };
+    const keep = local
+      ? { reactions: local.reactions, reactionMarks: local.reactionMarks, upload: undefined }
+      : { reactions: [] };
     if (m.deletedAt !== null) {
       return {
         ...(local ?? { reactions: [] }),
@@ -783,18 +830,39 @@ export class MessagingEngine {
       }
       changed.set(m.id, m);
     }
+    const offscreen: LocalMessage[] = [];
     for (const id of new Set([...changed.values()].map((m) => m.conversationId))) {
+      const list = [...messages[id]!].sort(bySeq);
+      const loaded = new Set(list.map((m) => m.id));
       const touched = new Set(
         [...changed.values()]
           .filter((m) => m.conversationId === id)
           .map((m) => (m.kind === 'reaction' ? m.targetId! : m.id)),
       );
-      messages[id] = withReactions([...messages[id]!].sort(bySeq), touched, (m) =>
-        changed.set(m.id, m),
+      messages[id] = withReactions(list, touched, (m) => changed.set(m.id, m));
+      // Reactions to messages only in the cache (older than what's loaded).
+      offscreen.push(
+        ...[...changed.values()].filter(
+          (m) => m.conversationId === id && m.kind === 'reaction' && !loaded.has(m.targetId!),
+        ),
       );
     }
     void this.cache((st) => st.saveMessages([...changed.values()]));
+    if (offscreen.length) void this.reactOffscreen(offscreen);
     this.emit({ messages });
+  }
+
+  /** Apply reactions to cached messages that aren't loaded, in the cache itself. */
+  private async reactOffscreen(reactions: LocalMessage[]) {
+    await this.cache(async (st) => {
+      const targets = await st.getMessages([...new Set(reactions.map((r) => r.targetId!))]);
+      const updated = targets.flatMap((t) => {
+        let next = normalizeMessage(t);
+        for (const r of reactions) if (r.targetId === t.id) next = applyReaction(next, r) ?? next;
+        return next === t ? [] : [next];
+      });
+      await st.saveMessages(updated);
+    });
   }
 
   private applyReceipt(
@@ -1000,7 +1068,8 @@ export class MessagingEngine {
         };
       } catch (e) {
         const mismatch = mismatchOf(e);
-        if (!mismatch || attempt >= MAX_SEND_ATTEMPTS) throw e;
+        // Someone can't receive encrypted messages yet: retrying now won't help.
+        if (!mismatch || mismatch.unkeyed.length || attempt >= MAX_SEND_ATTEMPTS) throw e;
         await this.deps.crypto.refresh(mismatch, members);
         fresh = true; // membership may have changed too
       }
@@ -1123,17 +1192,20 @@ export class MessagingEngine {
     }
   }
 
-  /** Remove a local-only message (and recompute what it affected). */
+  /** Remove a local-only message (and undo a pending reaction it applied). */
   private drop(m: LocalMessage) {
-    const list = (this.snapshot.messages[m.conversationId] ?? []).filter((x) => x.id !== m.id);
-    const touched = new Set(m.targetId ? [m.targetId] : []);
     const changed: LocalMessage[] = [];
-    this.emit({
-      messages: {
-        ...this.snapshot.messages,
-        [m.conversationId]: withReactions(list, touched, (x) => changed.push(x)),
-      },
-    });
+    const list = (this.snapshot.messages[m.conversationId] ?? [])
+      .filter((x) => x.id !== m.id)
+      .map((x) => {
+        const mark = x.id === m.targetId ? x.reactionMarks?.[m.senderId] : undefined;
+        if (!mark || mark.id !== m.id) return x;
+        const { [m.senderId]: _undone, ...rest } = x.reactionMarks!;
+        const next = withMarks(x, mark.prev ? { ...rest, [m.senderId]: mark.prev } : rest);
+        changed.push(next);
+        return next;
+      });
+    this.emit({ messages: { ...this.snapshot.messages, [m.conversationId]: list } });
     void this.cache((st) => st.deleteMessages([m.id]));
     void this.cache((st) => st.saveMessages(changed));
   }
@@ -1232,35 +1304,65 @@ export class MessagingEngine {
   }
 }
 
+const marksOf = (m: LocalMessage): Record<string, ReactionMark> =>
+  m.reactionMarks ??
+  Object.fromEntries(m.reactions.map((r) => [r.userId, { emoji: r.emoji, order: 0, id: '' }]));
+
+const withMarks = (m: LocalMessage, marks: Record<string, ReactionMark>): LocalMessage => ({
+  ...m,
+  reactionMarks: marks,
+  reactions: Object.entries(marks)
+    .filter(([, v]) => v.emoji)
+    .map(([userId, v]) => ({ userId, emoji: v.emoji })),
+});
+
 /**
- * Recompute `reactions` of the touched messages from the (encrypted)
- * reaction messages: each person's latest one counts; '' means removed.
+ * Apply one (encrypted) reaction message to its target: each person's newest
+ * one counts ('' = removed). Returns null if nothing changes.
+ */
+function applyReaction(target: LocalMessage, r: LocalMessage): LocalMessage | null {
+  if (target.deletedAt !== null || r.kind !== 'reaction' || r.targetId !== target.id) return null;
+  if (r.deletedAt !== null || r.undecryptable) return null;
+  const marks = marksOf(target);
+  const prev = marks[r.senderId];
+  const order = r.seq ?? Number.MAX_SAFE_INTEGER; // pending = newest
+  if (prev && prev.id !== r.id && prev.order > order) return null; // older than what we show
+  if (prev && prev.id === r.id && prev.order === order && prev.emoji === r.body) return null;
+  const pending = r.state !== 'sent';
+  const mark: ReactionMark = {
+    emoji: r.body,
+    order,
+    id: r.id,
+    prev: pending ? (prev?.id === r.id ? (prev.prev ?? null) : (prev ?? null)) : null,
+  };
+  return withMarks(target, { ...marks, [r.senderId]: mark });
+}
+
+/**
+ * Bring the touched messages' reactions up to date with the reaction
+ * messages loaded here. Reactions already recorded on a message (perhaps from
+ * reaction messages no longer loaded) are kept; deletion clears them.
  */
 function withReactions(
   list: LocalMessage[],
   touched: Set<string>,
   onChange: (m: LocalMessage) => void,
 ): LocalMessage[] {
-  const latest = new Map<string, LocalMessage>();
-  const order = (m: LocalMessage) => m.seq ?? Number.MAX_SAFE_INTEGER; // pending = newest
-  for (const r of list) {
-    if (r.kind !== 'reaction' || !r.targetId || !touched.has(r.targetId)) continue;
-    if (r.deletedAt !== null || r.undecryptable) continue;
-    const key = `${r.targetId} ${r.senderId}`;
-    const prev = latest.get(key);
-    if (!prev || order(r) >= order(prev)) latest.set(key, r);
-  }
+  const byTarget = new Map<string, LocalMessage[]>();
+  for (const r of list)
+    if (r.kind === 'reaction' && r.targetId && touched.has(r.targetId))
+      byTarget.set(r.targetId, [...(byTarget.get(r.targetId) ?? []), r]);
   return list.map((m) => {
     if (m.kind === 'reaction' || !touched.has(m.id)) return m;
-    const reactions =
-      m.deletedAt !== null
-        ? []
-        : [...latest.values()]
-            .filter((r) => r.targetId === m.id && r.body)
-            .map((r) => ({ userId: r.senderId, emoji: r.body }));
-    if (JSON.stringify(reactions) === JSON.stringify(m.reactions)) return m;
-    const next = { ...m, reactions };
-    onChange(next);
+    if (m.deletedAt !== null) {
+      if (m.reactions.length === 0 && !m.reactionMarks) return m;
+      const cleared = { ...m, reactions: [], reactionMarks: undefined };
+      onChange(cleared);
+      return cleared;
+    }
+    let next = m;
+    for (const r of byTarget.get(m.id) ?? []) next = applyReaction(next, r) ?? next;
+    if (next !== m) onChange(next);
     return next;
   });
 }

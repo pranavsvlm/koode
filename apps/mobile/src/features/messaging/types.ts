@@ -8,6 +8,8 @@ import type {
   SystemEvent,
 } from '@koode/shared';
 
+export type ReactionMark = { emoji: string; order: number; id: string; prev?: ReactionMark | null };
+
 /** A file encrypted for upload: the ciphertext's location, key and digest. */
 export type SealedFile = FileSecret & { uri: string; size: number };
 
@@ -57,6 +59,12 @@ export type LocalMessage = {
   targetId: string | null;
   /** Derived from reaction messages (latest per person). */
   reactions: Reaction[];
+  /**
+   * Per person, the reaction message that set `reactions` (its order = seq,
+   * pending = newest). A pending one remembers what it replaced, so a failed
+   * send can put it back.
+   */
+  reactionMarks?: Record<string, ReactionMark>;
   /**
    * Content came from this device (sent here) or was decrypted here. The
    * Double Ratchet can decrypt a message only once, so such content is never
@@ -122,6 +130,8 @@ export interface MessagingStore {
   saveMessages(messages: LocalMessage[]): Promise<void>;
   /** Cached copies by id (including ones not loaded at start-up). */
   getMessages(ids: string[]): Promise<LocalMessage[]>;
+  /** Cached messages before a sequence number, newest first. */
+  olderMessages(conversationId: string, beforeSeq: number, limit: number): Promise<LocalMessage[]>;
   deleteMessages(ids: string[]): Promise<void>;
   /** The conversation and its messages (left or removed from a group). */
   removeConversation(id: string): Promise<void>;
@@ -142,6 +152,11 @@ export function memoryStore(): MessagingStore & { dump: () => { messages: LocalM
     saveUsers: async (list) => list.forEach((u) => users.set(u.id, u)),
     saveMessages: async (list) => list.forEach((m) => messages.set(m.id, m)),
     getMessages: async (ids) => ids.flatMap((id) => (messages.has(id) ? [messages.get(id)!] : [])),
+    olderMessages: async (conversationId, beforeSeq, limit) =>
+      [...messages.values()]
+        .filter((m) => m.conversationId === conversationId && m.seq !== null && m.seq < beforeSeq)
+        .sort((a, b) => b.seq! - a.seq!)
+        .slice(0, limit),
     deleteMessages: async (ids) => ids.forEach((id) => messages.delete(id)),
     removeConversation: async (id) => {
       conversations.delete(id);

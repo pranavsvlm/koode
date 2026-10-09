@@ -27,6 +27,14 @@ import { usePreferences, type AppearancePreference } from '@/stores/preferences'
 import { generateRecoveryKey } from '@/features/auth/validation';
 import { useSession } from '@/stores/session';
 import { deviceCrypto } from '@/features/crypto';
+import {
+  measureDerive,
+  measureFileCrypto,
+  measureStartupQueries,
+  perfLog,
+  seedCache,
+} from './perfTour';
+import { runResilience } from './resilienceTour';
 
 /**
  * DEVELOPMENT ONLY: walks through every screen so the UI can be reviewed and
@@ -218,8 +226,9 @@ export const MESSAGING_TOUR: Step[] = [
 /**
  * Two-party calling check against the real server and a local LiveKit. A peer
  * script (apps/server/scripts/call-peer.mjs) plays "Maya": it calls this
- * account, joins the media room with the LiveKit CLI, hangs up, then declines
- * a call from here. Steps invoke the same handlers as the on-screen buttons.
+ * account (the media key end-to-end encrypted), joins the media room with
+ * LiveKit's Node SDK and frame encryption, hangs up, then declines a call
+ * from here. Steps invoke the same handlers as the on-screen buttons.
  */
 let callPeer = '';
 const callLog = (label: string) => {
@@ -260,7 +269,19 @@ export const CALL_TOUR: Step[] = [
     },
   },
   { name: 'connecting', run: () => callLog('after-accept') },
-  { name: 'connected', run: () => callLog('connected') },
+  {
+    name: 'connected',
+    run: () => {
+      callLog('connected');
+      void callController
+        .audioStats()
+        .then((audio) =>
+          console.log(
+            `[tour-call] media ${JSON.stringify({ encrypted: callController.getSnapshot().encrypted, audio })}`,
+          ),
+        );
+    },
+  },
   {
     name: 'muted',
     run: () => void callController.toggleMic().then(() => callLog('muted')),
@@ -698,10 +719,42 @@ export const E2EE_TOUR: Step[] = [
   { name: 'done', run: () => e2eeLog('done') },
 ];
 
+/** Measurements run one after another (each can take seconds). */
+async function runPerf() {
+  await new Promise((r) => setTimeout(r, 2500));
+  for (const [name, run] of [
+    ['seed', seedCache],
+    ['startup-cache', measureStartupQueries],
+    ['derive', async () => measureDerive()],
+    ['file-crypto', measureFileCrypto],
+  ] as const) {
+    try {
+      await run();
+    } catch (e) {
+      perfLog(`${name} FAILED`, e instanceof Error ? e.message : String(e));
+    }
+  }
+  console.log('[tour] 1 done');
+}
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
     if (!__DEV__ || !enabled) return;
+    if (mode === 'perf') {
+      void runPerf();
+      return;
+    }
+    if (mode === 'resilience') {
+      void useSession
+        .getState()
+        .signOut()
+        .then(runResilience)
+        .catch((e: unknown) =>
+          console.log(`[tour-res] FAILED ${e instanceof Error ? e.message : String(e)}`),
+        );
+      return;
+    }
     // Start signed out so onboarding screens are reachable. NOTE: this removes
     // the current device from its account on the local server.
     void useSession.getState().signOut();

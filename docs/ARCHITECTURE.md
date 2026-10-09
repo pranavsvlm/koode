@@ -179,18 +179,26 @@ app ◄──WebSocket events──── UserSocket DO ◄───────
     the one shown to others (`shared_read_seq`) stops advancing.
   - The setting is reciprocal: with yours off, you don't see others' read ticks either.
 - **App engine (`features/messaging`):**
-  - SQLite cache, so chats open instantly and are readable offline.
+  - SQLite cache, so chats open instantly and are readable offline. Start-up loads
+    only the newest 50 messages of each chat (one index range each) plus the
+    outbox; scrolling back reads older ones from the cache first, and from the
+    server only when the cache runs out.
   - Offline outbox: sends are shown immediately and delivered in order once connected.
     Permanent rejections show as failed; tap to retry.
   - Reconnection with exponential backoff (1 s → 30 s, with jitter).
   - A 25 s heartbeat with a 10 s pong timeout catches silently dead connections, such
     as after a network switch. Foregrounding the app reconnects immediately.
+  - After 30 s in the background (never during a call) the connection closes and every
+    timer stops, so the radio can sleep; pushes cover the background and the app
+    catches up when it returns.
   - After reconnecting it catches up: the conversation list, then
     `changedSince=<max revision>` per chat, which returns new messages _and_ edits
     (reactions, deletions). See Media and groups.
   - History: the newest 50 messages for a new chat, then older pages on scroll.
   - Delivered and read receipts are batched (400 ms); typing sends are throttled (3 s),
     and incoming typing indicators expire after 5 s.
+  - Rendering: the chat store keeps the same objects for unchanged chats and messages,
+    so a typing indicator or one new message re-renders only what changed.
 - **Directory:** `GET /v1/users` lists every active member of the instance (it's
   invite-only), with public profile fields only.
 - **Device-only:** pin, mute and "delete for me".
@@ -259,9 +267,11 @@ member ── GET /attachments/:id/content (Range) ◄────────�
 
 ### Reactions and deletion
 
-- **Reactions:** one per person per message, set or removed through the
-  `ConversationRoom`. They show at once in the app and are reverted if the server
-  refuses.
+- **Reactions:** encrypted messages of kind `reaction` (Phase 8); each person's newest
+  one counts. The app records them on the target message (with the sequence that set
+  them), so they survive when the reaction message itself isn't loaded, and applies
+  reactions to messages that are only in the cache directly there. Mine show at once
+  and are put back if sending fails.
 - **Delete for everyone:** the sender, or a group admin. It erases the text, the
   file and the reactions, and the message stays as a "Message deleted" marker.
   "Delete for me" hides it on this device only.
@@ -531,7 +541,9 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
     and hands out bundles (one-time keys are consumed atomically).
   - **Device numbers:** `devices.signal_device_id` is 1, 2, 3 … per account and
     never reused.
-  - **Sends:** checked for exact device coverage (409 with `{missing, extra}`).
+  - **Sends:** checked for exact device coverage (409 with `{missing, extra}`). A
+    member with no keyed device at all is refused too (409 with `unkeyed`): a message
+    nobody can decrypt would be lost.
   - **Storage:** `message_envelopes` and `call_envelopes`.
   - **Who gets what:** each member's realtime event carries only their devices'
     envelopes; history returns only the reading device's; conversation summaries
@@ -548,7 +560,8 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
     retrying.
 - **Attachments:**
   - The app encrypts the processed file (and video poster) into the outbox before
-    creating the upload. The server learns only the ciphertext size.
+    creating the upload, streaming in 1 MiB chunks (a 100 MB video adds about 18 MB
+    of memory). The server learns only the ciphertext size.
   - Downloads are digest-checked and decrypted into the cache. A partial or altered
     file is never cached.
 - **Trust UI:** a contact's "Verify Safety Number" screen shows one 60-digit number

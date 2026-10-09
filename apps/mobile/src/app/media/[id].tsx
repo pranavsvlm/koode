@@ -226,6 +226,7 @@ function ViewerImage(p: { attachment: Visual; width: number; height: number; lab
       style={{ width: p.width, height: p.height }}
       contentFit="contain"
       transition={150}
+      cachePolicy="memory"
       accessibilityLabel={p.label}
     />
   );
@@ -250,6 +251,7 @@ function ViewerVideo(p: { attachment: Visual; width: number; height: number; lab
           placeholder={previewSource(p.attachment)}
           style={StyleSheet.absoluteFill}
           contentFit="contain"
+          cachePolicy="memory"
         />
         {file.failed ? (
           <Text variant="subhead" style={{ color: '#FFFFFF' }}>

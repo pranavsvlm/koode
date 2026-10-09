@@ -10,6 +10,9 @@ import type { LocalMessage, MessagingStore } from './types';
  * message can only be decrypted once), protected by the platform's file
  * encryption; the cache is erased at sign-out.
  */
+/** Messages per chat loaded at start-up (a screenful or two). */
+export const START_MESSAGES = 50;
+
 export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
   // One shared connection; concurrent callers await the same open.
   let opening: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -34,6 +37,7 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
         doc TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS messages_conversation ON messages (conversation_id, seq);
+      CREATE INDEX IF NOT EXISTS messages_pending ON messages (created_at) WHERE seq IS NULL;
     `);
     return db;
   };
@@ -71,15 +75,34 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
           await d.getAllAsync('SELECT doc FROM conversations'),
         ),
         users: parse<PublicUser>(await d.getAllAsync('SELECT doc FROM users')),
-        // Keep start-up bounded: the newest 300 messages per conversation.
-        messages: parse<LocalMessage>(
-          await d.getAllAsync(
-            `SELECT doc FROM (
-               SELECT doc, ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY COALESCE(seq, 9e15) DESC, created_at DESC) AS r
-               FROM messages) WHERE r <= 300`,
-          ),
-        ),
+        // Keep start-up light: the newest messages of each chat (one index
+        // range each) and anything still in the outbox; older ones are read
+        // from here as the user scrolls (`olderMessages`).
+        messages: parse<LocalMessage>([
+          ...(await d.getAllAsync<{ doc: string }>('SELECT doc FROM messages WHERE seq IS NULL')),
+          ...(
+            await Promise.all(
+              (await d.getAllAsync<{ id: string }>('SELECT id FROM conversations')).map((c) =>
+                d.getAllAsync<{ doc: string }>(
+                  'SELECT doc FROM messages WHERE conversation_id = ? AND seq IS NOT NULL ORDER BY seq DESC LIMIT ?',
+                  c.id,
+                  START_MESSAGES,
+                ),
+              ),
+            )
+          ).flat(),
+        ]),
       };
+    },
+    async olderMessages(conversationId, beforeSeq, limit) {
+      const d = await open();
+      const rows = await d.getAllAsync<{ doc: string }>(
+        'SELECT doc FROM messages WHERE conversation_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?',
+        conversationId,
+        beforeSeq,
+        limit,
+      );
+      return rows.map((r) => JSON.parse(r.doc) as LocalMessage);
     },
     saveConversations: (list) => upsert('conversations', list),
     saveUsers: (list) => upsert('users', list),
@@ -138,6 +161,7 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
     saveUsers: (list) => serial(() => store.saveUsers(list)),
     saveMessages: (list) => serial(() => store.saveMessages(list)),
     getMessages: (ids) => serial(() => store.getMessages(ids)),
+    olderMessages: (id, before, limit) => serial(() => store.olderMessages(id, before, limit)),
     deleteMessages: (ids) => serial(() => store.deleteMessages(ids)),
     removeConversation: (id) => serial(() => store.removeConversation(id)),
     clear: () => serial(() => store.clear()),

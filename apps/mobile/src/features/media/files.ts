@@ -1,5 +1,6 @@
 import type { AttachmentMeta, FileSecret } from '@koode/shared';
 import { Directory, File, Paths } from 'expo-file-system';
+import { Image } from 'expo-image';
 import { authClient } from '@/features/auth';
 import { decryptFile, encryptFile } from '@/features/crypto';
 import { ApiClientError } from '@/lib/api';
@@ -185,6 +186,9 @@ export function discardFiles(
 
 /** Sign-out: nothing from the account stays on the device. */
 export function clearMediaFiles() {
+  // Images are shown from memory only, but clear expo-image's caches to be sure.
+  void Image.clearMemoryCache();
+  void Image.clearDiskCache();
   for (const d of [new Directory(Paths.document, 'outbox'), new Directory(Paths.cache, 'media')]) {
     try {
       if (d.exists) d.delete();

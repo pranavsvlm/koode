@@ -209,40 +209,110 @@ public class KoodeSignalModule: Module {
       }
     }
 
-    /// Encrypts a file with a fresh random key (AES-256-GCM). The digest is the
-    /// SHA-256 of the ciphertext, checked before decrypting.
+    /// Encrypts a file with a fresh random key (AES-256-GCM), streaming in
+    /// chunks so large videos don't have to fit in memory. The output is
+    /// libsignal's attachment layout (nonce ‖ ciphertext ‖ tag); the digest is
+    /// the SHA-256 of all of it, checked before decrypting.
     AsyncFunction("encryptFile") { (inputUri: String, outputUri: String) -> [String: String] in
       try self.files.sync {
-        var key = Data(count: 32)
-        let status = key.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-        guard status == errSecSuccess else { throw SignalError.invalidState("No randomness") }
-        let plain = try Data(contentsOf: self.url(inputUri))
-        let sealed = try Aes256GcmEncryptedData.encrypt(plain, key: key).concatenate()
-        try sealed.write(to: self.url(outputUri), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        let key = try self.random(32)
+        let nonce = try self.random(Aes256GcmEncryptedData.nonceLength)
+        let cipher = try Aes256GcmEncryption(key: key, nonce: nonce, associatedData: Data())
+        let input = try FileHandle(forReadingFrom: self.url(inputUri))
+        defer { try? input.close() }
+        let output = try self.url(outputUri)
+        let (temp, writer) = try self.openForWriting(next: output)
+        var hasher = SHA256()
+        var size = 0
+        do {
+          try writer.write(contentsOf: nonce)
+          hasher.update(data: nonce)
+          size += nonce.count
+          while var chunk = try input.read(upToCount: Self.chunk), !chunk.isEmpty {
+            try cipher.encrypt(&chunk)
+            try writer.write(contentsOf: chunk)
+            hasher.update(data: chunk)
+            size += chunk.count
+          }
+          let tag = try cipher.computeTag()
+          try writer.write(contentsOf: tag)
+          hasher.update(data: tag)
+          size += tag.count
+          try writer.close()
+          try self.replace(output, with: temp)
+        } catch {
+          try? writer.close()
+          try? FileManager.default.removeItem(at: temp)
+          throw error
+        }
         return [
           "key": key.base64EncodedString(),
-          "digest": Data(SHA256.hash(data: sealed)).base64EncodedString(),
-          "size": String(sealed.count),
+          "digest": Data(hasher.finalize()).base64EncodedString(),
+          "size": String(size),
         ]
       }
     }
 
+    /// Checks the ciphertext's digest, then decrypts in chunks and verifies the
+    /// authentication tag. Nothing is left at the output unless all of it
+    /// checks out.
     AsyncFunction("decryptFile") { (inputUri: String, outputUri: String, key: String, digest: String) in
       try self.files.sync {
-        let sealed = try Data(contentsOf: self.url(inputUri))
-        guard Data(SHA256.hash(data: sealed)) == (try self.bytes(digest)) else {
+        let inputURL = try self.url(inputUri)
+        let expected = try self.bytes(digest)
+        let nonceLength = Aes256GcmEncryptedData.nonceLength
+        let tagLength = Aes256GcmEncryptedData.authenticationTagLength
+
+        // 1. Digest of the whole file.
+        let reader = try FileHandle(forReadingFrom: inputURL)
+        defer { try? reader.close() }
+        var hasher = SHA256()
+        var total = 0
+        while let chunk = try reader.read(upToCount: Self.chunk), !chunk.isEmpty {
+          hasher.update(data: chunk)
+          total += chunk.count
+        }
+        guard Data(hasher.finalize()) == expected else {
           throw SignalError.invalidMessage("File digest doesn’t match")
         }
-        let plain = try Aes256GcmEncryptedData(concatenated: sealed).decrypt(key: try self.bytes(key))
-        try plain.write(to: self.url(outputUri), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        guard total >= nonceLength + tagLength else {
+          throw SignalError.invalidMessage("File is too short")
+        }
+
+        // 2. Decrypt the middle; verify the tag at the end.
+        try reader.seek(toOffset: 0)
+        guard let nonce = try reader.read(upToCount: nonceLength), nonce.count == nonceLength else {
+          throw SignalError.invalidMessage("File is too short")
+        }
+        let cipher = try Aes256GcmDecryption(key: try self.bytes(key), nonce: nonce, associatedData: Data())
+        let output = try self.url(outputUri)
+        let (temp, writer) = try self.openForWriting(next: output)
+        do {
+          var remaining = total - nonceLength - tagLength
+          while remaining > 0 {
+            guard var chunk = try reader.read(upToCount: min(Self.chunk, remaining)), !chunk.isEmpty else {
+              throw SignalError.invalidMessage("File ended early")
+            }
+            remaining -= chunk.count
+            try cipher.decrypt(&chunk)
+            try writer.write(contentsOf: chunk)
+          }
+          guard let tag = try reader.read(upToCount: tagLength), try cipher.verifyTag(tag) else {
+            throw SignalError.invalidMessage("File failed authentication")
+          }
+          try writer.close()
+          try self.replace(output, with: temp)
+        } catch {
+          try? writer.close()
+          try? FileManager.default.removeItem(at: temp)
+          throw error
+        }
       }
     }
 
     /// 32 random bytes (call media keys).
     AsyncFunction("randomKey") { () -> String in
-      var key = Data(count: 32)
-      _ = key.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
-      return key.base64EncodedString()
+      try self.random(32).base64EncodedString()
     }
 
     /// Sign-out: every key and session on this device.
@@ -258,6 +328,35 @@ public class KoodeSignalModule: Module {
   }
 
   private func nowMillis() -> UInt64 { UInt64(Date().timeIntervalSince1970 * 1000) }
+
+  /// File encryption works through files a chunk at a time.
+  private static let chunk = 1 << 20
+
+  private func random(_ count: Int) throws -> Data {
+    var data = Data(count: count)
+    let status = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }
+    guard status == errSecSuccess else { throw SignalError.invalidState("No randomness") }
+    return data
+  }
+
+  /// A protected temporary file next to `next`, opened for writing.
+  private func openForWriting(next: URL) throws -> (URL, FileHandle) {
+    let temp = next.deletingLastPathComponent().appendingPathComponent(".\(UUID().uuidString).part")
+    guard FileManager.default.createFile(
+      atPath: temp.path, contents: nil,
+      attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+    else { throw SignalError.invalidState("Can’t create \(temp.lastPathComponent)") }
+    return (temp, try FileHandle(forWritingTo: temp))
+  }
+
+  /// Move a finished temporary file into place (replacing anything there).
+  private func replace(_ target: URL, with temp: URL) throws {
+    if FileManager.default.fileExists(atPath: target.path) {
+      _ = try FileManager.default.replaceItemAt(target, withItemAt: temp)
+    } else {
+      try FileManager.default.moveItem(at: temp, to: target)
+    }
+  }
 
   private func bytes(_ base64: String) throws -> Data {
     guard let d = Data(base64Encoded: base64) else { throw SignalError.invalidArgument("Not base64") }

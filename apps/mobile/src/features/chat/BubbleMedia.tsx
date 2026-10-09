@@ -33,6 +33,8 @@ export function BubbleMedia({
         contentFit="cover"
         transition={200}
         recyclingKey={attachment.attachmentId ?? attachment.localUri}
+        // Decrypted files are already local: no second (plaintext) copy on disk.
+        cachePolicy="memory"
         accessibilityIgnoresInvertColors
       />
       {attachment.progress !== undefined && (

@@ -1087,3 +1087,106 @@ describe('MessagingEngine — end-to-end encryption', () => {
     expect(t.calls.decrypt).toBe(0);
   });
 });
+
+describe('MessagingEngine — lazy history', () => {
+  /** A cache that, like SQLite, loads only the newest few messages per chat at start-up. */
+  const lazy = (store: ReturnType<typeof memoryStore>, perChat: number): MessagingStore => ({
+    ...store,
+    load: async () => {
+      const all = await store.load();
+      const byChat = new Map<string, typeof all.messages>();
+      for (const m of all.messages)
+        byChat.set(m.conversationId, [...(byChat.get(m.conversationId) ?? []), m]);
+      return {
+        ...all,
+        messages: [...byChat.values()].flatMap((l) =>
+          l.sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0)).slice(0, perChat),
+        ),
+      };
+    },
+  });
+
+  it('scrolls back through cached history without the network', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    for (let i = 1; i <= 30; i++) t.server.post('c1', MAYA, `m${i}`);
+    await t.engine.start();
+    await t.online();
+    t.engine.stop();
+    const again = setup({ server: t.server, store: lazy(t.store, 10) });
+    t.server.state.online = false;
+    await again.engine.start();
+    expect(bodies(again.engine, 'c1')).toHaveLength(10);
+    const fetch = jest.spyOn(t.server.api, 'messages');
+    await again.engine.loadOlder('c1');
+    expect(bodies(again.engine, 'c1')).toHaveLength(30);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(again.calls.decrypt).toBe(0);
+  });
+
+  it('keeps reactions on messages that are only in the cache', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const first = t.server.post('c1', MAYA, 'old one');
+    for (let i = 1; i <= 20; i++) t.server.post('c1', MAYA, `m${i}`);
+    await t.engine.start();
+    await t.online();
+    t.engine.stop();
+
+    // Restarted with only the newest 5 loaded; a reaction to the old message arrives.
+    const again = setup({ server: t.server, store: lazy(t.store, 5) });
+    await again.engine.start();
+    await again.online();
+    again
+      .socket()
+      .receive({ type: 'message', message: t.server.react('c1', MAYA, first.id, '🎉') });
+    await flush();
+    const cached = (await t.store.getMessages([first.id]))[0]!;
+    expect(cached.reactions).toEqual([{ userId: MAYA, emoji: '🎉' }]);
+    // Scrolling back shows it, even though the reaction message itself isn't reloaded.
+    again.engine.stop();
+    const third = setup({ server: t.server, store: lazy(t.store, 5) });
+    await third.engine.start();
+    await third.engine.loadOlder('c1');
+    await third.engine.loadOlder('c1');
+    await third.engine.loadOlder('c1');
+    expect(shown(third.engine, 'c1').find((m) => m.id === first.id)?.reactions).toEqual([
+      { userId: MAYA, emoji: '🎉' },
+    ]);
+  });
+
+  it('puts back my previous reaction if a new one can’t be sent', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const m = t.server.post('c1', MAYA, 'hi');
+    await t.engine.start();
+    await t.online();
+    await t.engine.react('c1', m.id, '👍');
+    t.server.state.online = false;
+    await expect(t.engine.react('c1', m.id, '😂')).rejects.toThrow();
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([{ userId: ME, emoji: '👍' }]);
+  });
+});
+
+describe('MessagingEngine — background', () => {
+  it('suspends without timers or reconnects, and catches up on resume', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.engine.suspend();
+    expect(t.socket().closed).toBe(true);
+    expect(t.engine.getSnapshot().connection).toBe('offline');
+    expect(t.clock.pending()).toEqual([]); // no heartbeat, no reconnect: the radio can sleep
+    await t.clock.advance(60_000);
+    expect(t.sockets).toHaveLength(1);
+
+    t.server.post('c1', MAYA, 'while you were away');
+    t.engine.resume();
+    await flush();
+    t.socket().open();
+    await flush();
+    expect(t.sockets).toHaveLength(2);
+    expect(bodies(t.engine, 'c1')).toEqual(['while you were away']);
+  });
+});

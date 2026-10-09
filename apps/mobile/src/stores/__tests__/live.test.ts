@@ -240,3 +240,56 @@ describe('attachments and group changes', () => {
     expect(e('renamed', 'a', [], 'Cousins')).toBe('Maya renamed the group to “Cousins”');
   });
 });
+
+describe('deriveLive memoization', () => {
+  const snapshot = (messages: LocalMessage[]): Snapshot => ({
+    connection: 'online',
+    conversations: [
+      conv([
+        [me, 5, 5],
+        ['usr_b', 5, 5],
+      ]),
+    ],
+    messages: { c1: messages },
+    users: {},
+    typing: {},
+    hasMore: {},
+    progress: {},
+  });
+  const overlay = { reactions: {}, deleted: {}, pinned: {}, muted: {} };
+
+  it('keeps unchanged chats and messages as the same objects', () => {
+    const list = [msg(1), msg(2, 'sent', 'usr_b')];
+    const snap = snapshot(list);
+    const a = deriveLive(snap, me, overlay, true);
+    // A typing event: nothing about the messages changed.
+    const b = deriveLive({ ...snap, typing: { c1: ['usr_b'] } }, me, overlay, true);
+    expect(b.messages.c1).toBe(a.messages.c1);
+    expect(b.messages).toBe(a.messages);
+    expect(b.contacts).toBe(a.contacts);
+    // A new message: the chat changes, but existing bubbles keep their objects.
+    const c = deriveLive(
+      { ...snap, messages: { c1: [...list, msg(3, 'sent', 'usr_b')] } },
+      me,
+      overlay,
+      true,
+    );
+    expect(c.messages.c1).not.toBe(a.messages.c1);
+    expect(c.messages.c1![0]).toBe(a.messages.c1![0]);
+    expect(c.messages.c1![1]).toBe(a.messages.c1![1]);
+  });
+
+  it('updates a message whose status changed', () => {
+    const list = [msg(1)];
+    const a = deriveLive(snapshot(list), me, overlay, true);
+    const read = snapshot(list);
+    read.conversations[0]!.members[1]!.lastReadSeq = 1;
+    read.conversations[0]!.members[1]!.lastDeliveredSeq = 1;
+    const b = deriveLive(read, me, overlay, true);
+    expect(a.messages.c1![0]!.status).toBe('read'); // conv() starts everyone at 5
+    expect(b.messages.c1![0]).toBe(a.messages.c1![0]);
+    const unread = snapshot(list);
+    unread.conversations[0]!.members[1]!.lastReadSeq = 0;
+    expect(deriveLive(unread, me, overlay, true).messages.c1![0]!.status).toBe('delivered');
+  });
+});

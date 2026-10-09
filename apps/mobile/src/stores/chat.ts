@@ -74,6 +74,8 @@ type ChatState = {
   unload: () => Promise<void>;
   /** App came to the foreground / network returned. */
   resume: () => void;
+  /** App has been in the background a while: disconnect until `resume`. */
+  suspend: () => void;
   send: (conversationId: string, draft: Draft) => void;
   retry: (messageId: string) => void;
   loadOlder: (conversationId: string) => Promise<void>;
@@ -226,21 +228,42 @@ export function liveAttachment(m: LocalMessage, progress?: number): Attachment |
   }
 }
 
+/** UI copies of engine messages, by engine message (engine objects change only when they do). */
+const uiMessages = new WeakMap<LocalMessage, { key: string; out: Message }>();
+const uiChats = new Map<string, { inputs: unknown[]; out: Message[] }>();
+let uiContacts: { users: Snapshot['users']; out: Record<string, Contact> } | null = null;
+let uiConversations: Record<string, Conversation> = {};
+let uiMessageMap: Record<string, Message[]> = {};
+/** The whole record stays the same object when no chat changed. */
+function stableMessages(next: Record<string, Message[]>) {
+  const keys = Object.keys(next);
+  const same =
+    keys.length === Object.keys(uiMessageMap).length &&
+    keys.every((k) => next[k] === uiMessageMap[k]);
+  if (!same) uiMessageMap = next;
+  return uiMessageMap;
+}
+
 export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRead: boolean) {
   const mapId = (id: string) => (id === me ? ME : id);
-  const contacts: Record<string, Contact> = {};
-  for (const u of Object.values(snap.users)) {
-    contacts[u.id] = {
-      id: u.id,
-      displayName: u.displayName,
-      username: u.username,
-      about: u.about || undefined,
-    };
+  let contacts: Record<string, Contact> = {};
+  if (uiContacts?.users === snap.users) contacts = uiContacts.out;
+  else {
+    for (const u of Object.values(snap.users)) {
+      contacts[u.id] = {
+        id: u.id,
+        displayName: u.displayName,
+        username: u.username,
+        about: u.about || undefined,
+      };
+    }
+    uiContacts = { users: snap.users, out: contacts };
   }
   const conversations: Record<string, Conversation> = {};
   const byId = new Map(snap.conversations.map((c) => [c.id, c]));
   for (const c of snap.conversations) {
-    conversations[c.id] = {
+    const prev = uiConversations[c.id];
+    const next: Conversation = {
       id: c.id,
       kind: c.kind,
       title: c.title ?? undefined,
@@ -252,34 +275,77 @@ export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRea
       typingUserIds: (snap.typing[c.id] ?? []).filter((u) => u !== me),
       createdAt: c.createdAt,
     };
+    // Same content → same object (screens and rows that select it don't re-render).
+    conversations[c.id] = prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next;
   }
+  const keys = Object.keys(conversations);
+  const reuse =
+    keys.length === Object.keys(uiConversations).length &&
+    keys.every((k) => conversations[k] === uiConversations[k]);
+  const stableConversations = reuse ? uiConversations : conversations;
+  uiConversations = stableConversations;
   const name = (id: string, start: boolean) =>
     id === me ? (start ? 'You' : 'you') : (contacts[id]?.displayName ?? 'Someone');
   const messages: Record<string, Message[]> = {};
   for (const [convId, list] of Object.entries(snap.messages)) {
+    // Nothing this chat depends on changed (e.g. a typing event): reuse it as is.
+    const inputs = [
+      list,
+      byId.get(convId),
+      overlay.deleted,
+      snap.progress,
+      snap.users,
+      me,
+      showRead,
+    ];
+    const memo = uiChats.get(convId);
+    if (memo && memo.inputs.every((x, i) => x === inputs[i])) {
+      messages[convId] = memo.out;
+      continue;
+    }
     // Reactions are messages too (encrypted), but show only on their target.
-    messages[convId] = list
+    const next = list
       .filter((m) => m.kind !== 'reaction')
       .map((m) => {
         const deleted = m.deletedAt !== null || overlay.deleted[m.id] === true;
-        return {
+        const status =
+          m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered';
+        const progress = snap.progress[m.id];
+        const system = m.kind === 'system' && m.system ? systemText(m.system, name) : undefined;
+        // Unchanged messages keep their object, so memoized bubbles don't re-render.
+        const key = `${me}|${deleted}|${status}|${progress ?? ''}|${system ?? ''}`;
+        const hit = uiMessages.get(m);
+        if (hit?.key === key) return hit.out;
+        const out: Message = {
           id: m.id,
           conversationId: m.conversationId,
           senderId: mapId(m.senderId),
           text: deleted || !m.body ? undefined : m.body,
-          attachment: deleted ? undefined : liveAttachment(m, snap.progress[m.id]),
+          attachment: deleted ? undefined : liveAttachment(m, progress),
           createdAt: m.createdAt,
-          status:
-            m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered',
+          status,
           replyToId: m.replyToId ?? undefined,
           reactions: deleted ? [] : groupReactions(m.reactions, mapId),
           deleted,
           undecryptable: !deleted && m.undecryptable ? m.undecryptable : undefined,
-          system: m.kind === 'system' && m.system ? systemText(m.system, name) : undefined,
+          system,
         };
+        uiMessages.set(m, { key, out });
+        return out;
       });
+    // …and an unchanged chat keeps its array (list components skip it entirely).
+    const prev = memo?.out;
+    messages[convId] =
+      prev && prev.length === next.length && prev.every((x, i) => x === next[i]) ? prev : next;
+    uiChats.set(convId, { inputs, out: messages[convId]! });
   }
-  return { contacts, conversations, messages, hasMore: snap.hasMore, connection: snap.connection };
+  return {
+    contacts,
+    conversations: stableConversations,
+    messages: stableMessages(messages),
+    hasMore: snap.hasMore,
+    connection: snap.connection,
+  };
 }
 
 export const useChat = create<ChatState>((set, get) => {
@@ -362,6 +428,10 @@ export const useChat = create<ChatState>((set, get) => {
     },
 
     unload: async () => {
+      uiChats.clear();
+      uiContacts = null;
+      uiConversations = {};
+      uiMessageMap = {};
       void callController.hangUp();
       setCallIdentity(null);
       unsubscribe?.();
@@ -385,6 +455,7 @@ export const useChat = create<ChatState>((set, get) => {
     },
 
     resume: () => engine?.resume(),
+    suspend: () => engine?.suspend(),
 
     send: (conversationId, draft) => {
       if (get().mode === 'live') {

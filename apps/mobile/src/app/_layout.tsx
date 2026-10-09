@@ -5,11 +5,12 @@ import { registerGlobals } from '@livekit/react-native';
 
 import { SplashScreen, Stack, usePathname } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { AppState } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
 import { CallRouter } from '@/features/calls/CallRouter';
+import { callController } from '@/features/calls';
+import { AppState } from 'react-native';
 import { configureNotifications, useNotifications } from '@/features/notifications';
 import { useDevTour } from '@/dev/tour';
 import { DialogProvider, ToastProvider } from '@/components/ui';
@@ -17,6 +18,9 @@ import { useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
 import { useSession } from '@/stores/session';
 import { ThemeProvider, useThemeColors } from '@/theme/ThemeProvider';
+
+/** How long the app stays connected in the background before suspending. */
+const BACKGROUND_GRACE_MS = 30_000;
 
 // WebRTC globals for LiveKit (also configures the iOS audio session).
 registerGlobals();
@@ -65,12 +69,25 @@ function RootStack() {
     if (signedIn && userId) void loadChat(userId);
   }, [signedIn, userId, loadChat]);
 
-  // Reconnect / catch up when the app returns to the foreground.
+  // Reconnect / catch up when the app returns to the foreground. After 30 s
+  // in the background (and never during a call) the connection closes to
+  // save battery; pushes cover messages and calls meanwhile.
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const sub = AppState.addEventListener('change', (state) => {
+      clearTimeout(timer);
       if (state === 'active') useChat.getState().resume();
+      else if (state === 'background')
+        timer = setTimeout(() => {
+          if (AppState.currentState === 'active') return; // back already
+          const phase = callController.getSnapshot().phase;
+          if (phase === 'idle' || phase === 'ended') useChat.getState().suspend();
+        }, BACKGROUND_GRACE_MS);
     });
-    return () => sub.remove();
+    return () => {
+      clearTimeout(timer);
+      sub.remove();
+    };
   }, []);
 
   return (

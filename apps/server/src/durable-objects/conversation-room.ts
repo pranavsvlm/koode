@@ -97,7 +97,8 @@ export class ConversationRoom extends DurableObject<Env> {
           'UPDATE conversations SET last_rev = MAX(last_rev, ?) WHERE id = ?',
         ).bind(rev, this.conversationId)
       : this.env.DB.prepare(
-          'UPDATE conversations SET last_seq = MAX(last_seq, ?), last_rev = MAX(last_rev, ?), last_message_at = ? WHERE id = ?',
+          `UPDATE conversations SET last_seq = MAX(last_seq, ?1), last_message_seq = MAX(last_message_seq, ?1),
+             last_rev = MAX(last_rev, ?2), last_message_at = ?3 WHERE id = ?4`,
         ).bind(seq, rev, now, this.conversationId);
   }
 
@@ -189,6 +190,16 @@ export class ConversationRoom extends DurableObject<Env> {
     const expected = (await keyedDevices(db, [...this.members.keys()])).filter(
       (d) => !(d.userId === input.senderId && d.deviceId === input.senderDevice),
     );
+    // Everyone else must be able to read it: a message encrypted for nobody is lost.
+    const unkeyed = [...this.members.keys()].filter(
+      (u) => u !== input.senderId && !expected.some((d) => d.userId === u),
+    );
+    if (unkeyed.length)
+      return fail('conflict', 'Someone here can’t receive encrypted messages yet', {
+        missing: [],
+        extra: [],
+        unkeyed,
+      });
     const mismatch = coverage(expected, input.envelopes);
     if (mismatch) return fail('conflict', 'The recipients’ devices have changed', mismatch);
 

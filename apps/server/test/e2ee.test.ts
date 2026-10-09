@@ -204,6 +204,7 @@ describe('sending to devices', () => {
     expect(DeviceMismatch.parse(missing.json.error.details)).toEqual({
       missing: [{ userId: all[0]!.userId, deviceId: all[0]!.deviceId }],
       extra: [],
+      unkeyed: [],
     });
     const self = { ...all[0]!, userId: maya.user.id, deviceId: 1 };
     const extra = await post([...all, self, all[1]]);
@@ -270,6 +271,20 @@ describe('sending to devices', () => {
     expect(DeviceMismatch.parse(res.json.error.details).extra).toEqual([
       { userId: sam.user.id, deviceId: 1 },
     ]);
+  });
+});
+
+describe('recipients without keys', () => {
+  it('refuses a message nobody could read', async () => {
+    const { maya } = await twoUsers();
+    await seedInvite('THRDPERS0N03');
+    const zoe = (await registerUser({ inviteCode: 'THRDPERS0N03', username: 'zoe' })).session;
+    const id = await directChat(maya, zoe);
+    const res = await sendMessage(maya, id, 'hello?');
+    expect(res.status).toBe(409);
+    expect(DeviceMismatch.parse(res.json.error.details).unkeyed).toEqual([zoe.user.id]);
+    await publishKeys(zoe.accessToken);
+    expect((await sendMessage(maya, id, 'hello!')).status).toBe(201);
   });
 });
 

@@ -117,6 +117,8 @@ export type Envelope = z.infer<typeof Envelope>;
 export const DeviceMismatch = z.object({
   missing: z.array(z.object({ userId: z.string(), deviceId: z.number().int() })),
   extra: z.array(z.object({ userId: z.string(), deviceId: z.number().int() })),
+  /** Members with no device that can receive encrypted messages (yet). */
+  unkeyed: z.array(z.string()).default([]),
 });
 export type DeviceMismatch = z.infer<typeof DeviceMismatch>;
 

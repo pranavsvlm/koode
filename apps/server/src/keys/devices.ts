@@ -54,5 +54,5 @@ export function coverage(
   const missing = expected
     .filter((d) => !seen.has(key(d)))
     .map((d) => ({ userId: d.userId, deviceId: d.deviceId }));
-  return missing.length || extra.length ? { missing, extra } : null;
+  return missing.length || extra.length ? { missing, extra, unkeyed: [] } : null;
 }

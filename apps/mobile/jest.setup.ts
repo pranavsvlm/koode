@@ -48,3 +48,11 @@ jest.mock('livekit-client', () => {
     Track: { Source: { Camera: 'camera', Microphone: 'microphone' }, Kind: {} },
   };
 });
+
+// The messaging engine reports expected failures (offline sends, undecryptable
+// fixtures) in development; keep test output for real warnings.
+const warn = console.warn;
+console.warn = (...args: unknown[]) => {
+  if (typeof args[0] === 'string' && args[0].startsWith('[messaging]')) return;
+  warn(...args);
+};
