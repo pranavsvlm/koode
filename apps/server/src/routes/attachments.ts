@@ -1,4 +1,5 @@
 import {
+  ENCRYPTION_OVERHEAD,
   IMAGE_TYPES,
   THUMBNAIL_LIMIT,
   VIDEO_TYPES,
@@ -16,7 +17,7 @@ type AttachmentRow = {
   conversation_id: string;
   uploader_id: string;
   message_id: string | null;
-  kind: 'image' | 'video' | 'document' | 'voice';
+  kind: 'image' | 'video' | 'document' | 'voice' | 'encrypted';
   mime_type: string;
   size_bytes: number;
   name: string | null;
@@ -95,7 +96,7 @@ async function serve(c: Context<AppEnv>, key: string, a: AttachmentRow, contentT
     // Never rendered by a browser as a page, even if opened directly.
     'content-security-policy': "default-src 'none'; sandbox",
   });
-  if (a.kind === 'document') {
+  if (a.kind === 'document' || a.kind === 'encrypted') {
     headers.set(
       'content-disposition',
       `attachment; filename*=UTF-8''${encodeURIComponent(a.name ?? 'file')}`,
@@ -131,15 +132,15 @@ export const attachments = new Hono<AppEnv>()
     return c.json<OkResponse>({ ok: true });
   })
 
-  /** Video poster (JPEG). */
+  /** Video poster: an encrypted JPEG (the server can't tell what the file is). */
   .put('/:id/thumbnail', async (c) => {
     const a = await ownUnsent(c.env.DB, c.req.param('id'), c.get('auth').userId);
-    if (a.kind !== 'video') throw new ApiError('bad_request', 'Only videos have a thumbnail');
-    if (c.req.header('content-type') !== 'image/jpeg')
-      throw new ApiError('bad_request', 'Thumbnails must be JPEG');
+    if (a.kind !== 'encrypted') throw new ApiError('bad_request', 'Upload an encrypted file');
+    if (c.req.header('content-type') !== 'application/octet-stream')
+      throw new ApiError('bad_request', 'Thumbnails must be encrypted');
     await store(c, thumbnailKey(a.conversation_id, a.id), {
-      max: THUMBNAIL_LIMIT,
-      contentType: 'image/jpeg',
+      max: THUMBNAIL_LIMIT + ENCRYPTION_OVERHEAD,
+      contentType: 'application/octet-stream',
     });
     await c.env.DB.prepare('UPDATE attachments SET has_thumbnail = 1 WHERE id = ?')
       .bind(a.id)
@@ -149,13 +150,18 @@ export const attachments = new Hono<AppEnv>()
 
   .get('/:id/content', async (c) => {
     const a = await readable(c.env.DB, c.req.param('id'), c.get('auth').userId);
+    // Ciphertext (and legacy documents) are only ever opaque downloads.
     const type =
-      a.kind !== 'document' && INLINE.has(a.mime_type) ? a.mime_type : 'application/octet-stream';
+      a.kind !== 'document' && a.kind !== 'encrypted' && INLINE.has(a.mime_type)
+        ? a.mime_type
+        : 'application/octet-stream';
     return serve(c, contentKey(a.conversation_id, a.id), a, type);
   })
 
   .get('/:id/thumbnail', async (c) => {
     const a = await readable(c.env.DB, c.req.param('id'), c.get('auth').userId);
     if (!a.has_thumbnail) throw new ApiError('not_found', 'No thumbnail');
-    return serve(c, thumbnailKey(a.conversation_id, a.id), { ...a, kind: 'image' }, 'image/jpeg');
+    return a.kind === 'encrypted'
+      ? serve(c, thumbnailKey(a.conversation_id, a.id), a, 'application/octet-stream')
+      : serve(c, thumbnailKey(a.conversation_id, a.id), { ...a, kind: 'image' }, 'image/jpeg');
   });

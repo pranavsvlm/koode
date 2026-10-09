@@ -120,7 +120,8 @@ export const auth = new Hono<AppEnv>()
           ),
         db
           .prepare(
-            'INSERT INTO devices (id, user_id, name, platform, signing_public_key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            `INSERT INTO devices (id, user_id, name, platform, signing_public_key, created_at, last_seen_at, signal_device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT COALESCE(MAX(signal_device_id), 0) + 1 FROM devices WHERE user_id = ?2))`,
           )
           .bind(
             deviceId,
@@ -225,7 +226,8 @@ export const auth = new Hono<AppEnv>()
       await db.batch([
         db
           .prepare(
-            'INSERT INTO devices (id, user_id, name, platform, signing_public_key, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            `INSERT INTO devices (id, user_id, name, platform, signing_public_key, created_at, last_seen_at, signal_device_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, (SELECT COALESCE(MAX(signal_device_id), 0) + 1 FROM devices WHERE user_id = ?2))`,
           )
           .bind(
             deviceId,

@@ -226,6 +226,34 @@ node ../server/scripts/media-peer.mjs <maya code> <sam code> <path to Metro's lo
    poster, documents served as downloads, reactions, deletion, and that Maya lost
    access.
 
+### End-to-end encryption check (interoperability)
+
+Tests the app's libsignal (Swift) against Signal's own Node library
+(`@signalapp/libsignal-client`, a dev dependency of the server) and LiveKit's Node
+SDK. Needs the local Worker (with migration `0007` applied), `livekit-server --dev`,
+two invite codes, and the media files from the previous section (`photo.jpg` for the
+peer, `gps.jpg` in the app's `Documents/e2e/`):
+
+```sh
+xcrun simctl privacy booted grant microphone com.navoasis.koode.dev
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=e2ee EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/e2ee-peer.mjs <maya code> <path to Metro's log> /tmp/koode-media
+```
+
+The peer prints `PASS`/`FAIL` per check and exits non-zero on any failure:
+
+- encrypted text, photo and reactions both ways (the server only ever holds
+  ciphertext);
+- the safety numbers on both sides match;
+- the app's call key decrypts and names its call;
+- the app decrypts the peer's encrypted audio (measured from its WebRTC stats);
+- a listener with the right key hears it, and one with a wrong key hears nothing;
+- LiveKit reports every track GCM-encrypted.
+
+The Simulator's microphone is silent, so the app → peer audio direction can't be
+judged there.
+
 ### Reviewing every screen without tapping
 
 On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep

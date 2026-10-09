@@ -11,6 +11,7 @@ export function remoteOf(a: Attachment | undefined) {
     id: a.attachmentId,
     mimeType: a.mimeType ?? 'application/octet-stream',
     name: a.kind === 'document' ? a.name : null,
+    secret: a.secret,
   };
 }
 

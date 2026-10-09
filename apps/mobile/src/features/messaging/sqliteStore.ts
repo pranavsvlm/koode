@@ -5,7 +5,10 @@ import type { LocalMessage, MessagingStore } from './types';
 /**
  * SQLite-backed cache so chats open instantly and work offline. Rows hold
  * JSON documents keyed by id; indexes cover the queries we make.
- * Contents are plaintext until end-to-end encryption (Phase 8).
+ *
+ * Messages arrive end-to-end encrypted and are kept here decrypted (a
+ * message can only be decrypted once), protected by the platform's file
+ * encryption; the cache is erased at sign-out.
  */
 export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
   // One shared connection; concurrent callers await the same open.
@@ -96,6 +99,20 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
         }
       });
     },
+    async getMessages(ids) {
+      if (ids.length === 0) return [];
+      const d = await open();
+      const out: LocalMessage[] = [];
+      for (let i = 0; i < ids.length; i += 500) {
+        const chunk = ids.slice(i, i + 500);
+        const rows = await d.getAllAsync<{ doc: string }>(
+          `SELECT doc FROM messages WHERE id IN (${chunk.map(() => '?').join(',')})`,
+          ...chunk,
+        );
+        out.push(...rows.map((r) => JSON.parse(r.doc) as LocalMessage));
+      }
+      return out;
+    },
     async deleteMessages(ids) {
       if (ids.length === 0) return;
       const d = await open();
@@ -120,6 +137,7 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
     saveConversations: (list) => serial(() => store.saveConversations(list)),
     saveUsers: (list) => serial(() => store.saveUsers(list)),
     saveMessages: (list) => serial(() => store.saveMessages(list)),
+    getMessages: (ids) => serial(() => store.getMessages(ids)),
     deleteMessages: (ids) => serial(() => store.deleteMessages(ids)),
     removeConversation: (id) => serial(() => store.removeConversation(id)),
     clear: () => serial(() => store.clear()),

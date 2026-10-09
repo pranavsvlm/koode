@@ -27,6 +27,11 @@ jest.mock('@livekit/react-native', () => ({
     selectAudioOutput: async () => {},
   },
   VideoView: () => null,
+  RNKeyProvider: class {
+    async setSharedKey() {}
+    dispose() {}
+  },
+  RNE2EEManager: class {},
 }));
 jest.mock('livekit-client', () => {
   class Room {

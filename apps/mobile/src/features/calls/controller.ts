@@ -31,11 +31,16 @@ export type CallSnapshot = {
   cameraUnavailable: boolean;
   /** Local time media first connected (drives the call timer). */
   connectedAt: number | null;
+  /** The other person's media is arriving end-to-end encrypted (null: not yet known). */
+  encrypted: boolean | null;
 };
 
+/** Join credentials plus the call's media key (made by the caller, decrypted by the callee). */
+export type SecureJoin = CallJoin & { mediaKey: string };
+
 export type CallApi = {
-  start: (userId: string, kind: CallKind) => Promise<CallJoin>;
-  accept: (id: string) => Promise<CallJoin>;
+  start: (userId: string, kind: CallKind) => Promise<SecureJoin>;
+  accept: (id: string) => Promise<SecureJoin>;
   decline: (id: string) => Promise<Call>;
   end: (id: string) => Promise<Call>;
 };
@@ -67,6 +72,7 @@ const IDLE: CallSnapshot = {
   videoVersion: 0,
   cameraUnavailable: false,
   connectedAt: null,
+  encrypted: null,
 };
 
 const reasonFor = (state: Call['state']): EndReason =>
@@ -135,7 +141,7 @@ export class CallController {
       cameraOn: kind === 'video',
       speakerOn: kind === 'video',
     });
-    let join: CallJoin;
+    let join: SecureJoin;
     try {
       join = await this.deps.api.start(peerId, kind);
     } catch (e) {
@@ -211,7 +217,7 @@ export class CallController {
 
   // ——— During the call ———
 
-  private async joinMedia(join: CallJoin) {
+  private async joinMedia(join: SecureJoin) {
     const media = this.deps.createMedia();
     this.media = media;
     this.unsubs.push(
@@ -236,14 +242,23 @@ export class CallController {
       }),
       media.on('quality', (quality) => this.set({ quality })),
       media.on('video', () => this.set({ videoVersion: this.snap.videoVersion + 1 })),
+      media.on('encryption', (encrypted) => this.set({ encrypted })),
     );
     try {
-      await media.connect(join.media.url, join.media.token, { camera: false });
+      await media.connect(join.media.url, join.media.token, {
+        camera: false,
+        key: join.mediaKey,
+      });
       if (this.snap.cameraOn) await this.setCamera(true);
       if (this.snap.speakerOn) await media.setSpeaker(true);
     } catch {
       void this.hangUp('failed');
     }
+  }
+
+  /** Diagnostics for development checks (see MediaSession.audioStats). */
+  audioStats() {
+    return this.media?.audioStats?.() ?? Promise.resolve(null);
   }
 
   async toggleMic() {

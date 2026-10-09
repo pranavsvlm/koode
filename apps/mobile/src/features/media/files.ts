@@ -1,9 +1,10 @@
-import type { AttachmentMeta } from '@koode/shared';
+import type { AttachmentMeta, FileSecret } from '@koode/shared';
 import { Directory, File, Paths } from 'expo-file-system';
 import { authClient } from '@/features/auth';
+import { decryptFile, encryptFile } from '@/features/crypto';
 import { ApiClientError } from '@/lib/api';
 import { env } from '@/lib/env';
-import type { LocalUpload } from '@/features/messaging/types';
+import type { LocalAttachment, LocalUpload, SealedFile } from '@/features/messaging/types';
 
 /**
  * Files on the device:
@@ -11,7 +12,9 @@ import type { LocalUpload } from '@/features/messaging/types';
  *    survives restarts and low-storage purges);
  *  - media/: downloaded attachments, by attachment id (Caches: the system
  *    may purge them; they are downloaded again when needed).
- * Contents are plaintext until end-to-end encryption (Phase 8).
+ * The server only ever has ciphertext: files are encrypted into the outbox
+ * before upload and decrypted after download (checking the digest first).
+ * Local copies are plaintext, under the platform's file protection.
  */
 const outbox = () => ensureDir(new Directory(Paths.document, 'outbox'));
 const media = () => ensureDir(new Directory(Paths.cache, 'media'));
@@ -46,6 +49,14 @@ export async function toOutbox(sourceUri: string, ext: string): Promise<string> 
 
 export const fileSize = (uri: string) => new File(uri).size ?? 0;
 
+/** Encrypt an outbox file for upload, next to it (fresh key per file). */
+export async function sealFile(uri: string): Promise<SealedFile> {
+  const target = new File(outbox(), `${new File(uri).name}.sealed`);
+  if (target.exists) target.delete();
+  const secret = await encryptFile(uri, target.uri);
+  return { ...secret, uri: target.uri };
+}
+
 const contentFile = (a: Pick<AttachmentMeta, 'id' | 'mimeType' | 'name'>) =>
   new File(media(), `${a.id}.${extFor(a)}`);
 const posterFile = (id: string) => new File(media(), `${id}.poster.jpg`);
@@ -62,9 +73,12 @@ export function cachedPosterUri(id: string): string | null {
 
 const inflight = new Map<string, Promise<string>>();
 
-/** Download (once, with my credentials) and return the local file. */
+/**
+ * Download (once, with my credentials) and return the local file; encrypted
+ * attachments are checked and decrypted on the way in.
+ */
 export function download(
-  a: Pick<AttachmentMeta, 'id' | 'mimeType' | 'name'>,
+  a: Pick<AttachmentMeta, 'id' | 'mimeType' | 'name'> & { secret?: LocalAttachment['secret'] },
   part: 'content' | 'thumbnail' = 'content',
 ): Promise<string> {
   const file = part === 'content' ? contentFile(a) : posterFile(a.id);
@@ -82,9 +96,25 @@ export function download(
       partial,
       { headers: { Authorization: `Bearer ${token}` }, idempotent: true },
     );
+    const secret: FileSecret | null | undefined =
+      part === 'content' ? a.secret?.content : a.secret?.thumbnail;
+    if (a.secret && !secret) throw new Error('Missing file key');
     // The sender's own copy may have been moved into place meanwhile.
     if (file.exists) partial.delete();
-    else await partial.move(file);
+    else if (secret) {
+      const plain = new File(media(), `${a.id}.${part}.plain`);
+      try {
+        await decryptFile(partial.uri, plain.uri, secret);
+      } catch (e) {
+        if (plain.exists) plain.delete(); // altered or truncated: never cached
+        throw e;
+      } finally {
+        partial.delete();
+      }
+      // (A moved File object points at its new place, so nothing touches it after.)
+      if (file.exists) plain.delete();
+      else await plain.move(file);
+    } else await partial.move(file);
     return file.uri;
   })().finally(() => inflight.delete(key));
   inflight.set(key, run);
@@ -124,6 +154,7 @@ export async function upload(
 
 /** After sending: keep the outbox file as the cached copy (no re-download). */
 export function adoptUploaded(u: LocalUpload, attachment: AttachmentMeta) {
+  discardFiles({ uri: u.sealed?.uri ?? '', posterUri: u.posterSealed?.uri ?? null });
   try {
     const target = contentFile(attachment);
     if (!target.exists) new File(u.uri).moveSync(target);
@@ -137,9 +168,11 @@ export function adoptUploaded(u: LocalUpload, attachment: AttachmentMeta) {
   discardFiles(u);
 }
 
-/** Remove a pending upload's files. */
-export function discardFiles(u: Pick<LocalUpload, 'uri' | 'posterUri'>) {
-  for (const uri of [u.uri, u.posterUri]) {
+/** Remove a pending upload's files (and their encrypted copies). */
+export function discardFiles(
+  u: Pick<LocalUpload, 'uri' | 'posterUri'> & Partial<Pick<LocalUpload, 'sealed' | 'posterSealed'>>,
+) {
+  for (const uri of [u.uri, u.posterUri, u.sealed?.uri, u.posterSealed?.uri]) {
     if (!uri) continue;
     try {
       const f = new File(uri);

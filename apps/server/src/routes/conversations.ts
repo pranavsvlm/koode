@@ -1,13 +1,12 @@
 import {
   AddMembersRequest,
-  CreateAttachmentRequest,
   CreateConversationRequest,
+  CreateEncryptedAttachmentRequest,
   ReceiptRequest,
   RenameGroupRequest,
   SendMessageRequest,
-  SetReactionRequest,
   UpdateMemberRequest,
-  type AttachmentMeta,
+  type StoredAttachment,
   type OkResponse,
   type ConversationSummary,
   type Message,
@@ -17,9 +16,11 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../app';
 import { requireAuth } from '../auth/middleware';
 import type { RoomResult } from '../durable-objects/conversation-room';
+import { signalDeviceId } from '../keys/devices';
+import { limitUser, RULES } from '../lib/rate-limit';
 import { newId } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
-import { parseJson } from '../lib/validate';
+import { BODY_LIMITS, parseJson } from '../lib/validate';
 import {
   hydrate,
   loadSummaries,
@@ -32,7 +33,7 @@ const PAGE_DEFAULT = 50;
 const PAGE_MAX = 100;
 
 function unwrap<T>(r: RoomResult<T>): T {
-  if (!r.ok) throw new ApiError(r.code, r.message);
+  if (!r.ok) throw new ApiError(r.code, r.message, r.details);
   return r.value;
 }
 
@@ -166,7 +167,8 @@ export const conversations = new Hono<AppEnv>()
   .get('/:id/messages', async (c) => {
     const id = c.req.param('id');
     const db = c.env.DB;
-    if (!(await isMember(db, id, c.get('auth').userId)))
+    const { userId, deviceId } = c.get('auth');
+    if (!(await isMember(db, id, userId)))
       throw new ApiError('not_found', 'Conversation not found');
     const after = parseCursor(c.req.query('after'));
     const before = parseCursor(c.req.query('before'));
@@ -198,86 +200,65 @@ export const conversations = new Hono<AppEnv>()
     const page = forward
       ? rows.slice(0, limit)
       : rows.slice(rows.length - Math.min(rows.length, limit));
-    return c.json<MessagePage>({ messages: await hydrate(db, page), hasMore });
+    // Each device gets only its own ciphertexts.
+    const reader = { userId, device: await signalDeviceId(db, deviceId) };
+    return c.json<MessagePage>({ messages: await hydrate(db, page, reader), hasMore });
   })
 
-  /** Start an upload: the file itself goes to PUT /v1/attachments/:id/content. */
+  /**
+   * Start an encrypted upload: the ciphertext goes to PUT
+   * /v1/attachments/:id/content. What the file is travels in the message.
+   */
   .post('/:id/attachments', async (c) => {
-    const req = await parseJson(c, CreateAttachmentRequest);
+    const req = await parseJson(c, CreateEncryptedAttachmentRequest);
     const conversationId = c.req.param('id');
     const { userId } = c.get('auth');
+    await limitUser(c.env, RULES.createAttachment, userId);
     const db = c.env.DB;
     if (!(await isMember(db, conversationId, userId)))
       throw new ApiError('not_found', 'Conversation not found');
-    const meta: AttachmentMeta = {
+    const meta: StoredAttachment = {
       id: newId('att'),
-      kind: req.kind,
-      mimeType: req.mimeType,
+      kind: 'encrypted',
+      mimeType: 'application/octet-stream',
       sizeBytes: req.sizeBytes,
-      name: req.kind === 'document' ? req.name : null,
-      width: req.kind === 'image' || req.kind === 'video' ? req.width : null,
-      height: req.kind === 'image' || req.kind === 'video' ? req.height : null,
-      durationMs: req.kind === 'video' || req.kind === 'voice' ? req.durationMs : null,
-      waveform: req.kind === 'voice' ? req.waveform : null,
-      preview: req.kind === 'image' || req.kind === 'video' ? (req.preview ?? null) : null,
+      name: null,
+      width: null,
+      height: null,
+      durationMs: null,
+      waveform: null,
+      preview: null,
       hasThumbnail: false,
     };
     await db
       .prepare(
-        `INSERT INTO attachments (id, conversation_id, uploader_id, kind, mime_type, size_bytes, name, width, height, duration_ms, waveform, preview, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO attachments (id, conversation_id, uploader_id, kind, mime_type, size_bytes, created_at)
+         VALUES (?, ?, ?, 'encrypted', ?, ?, ?)`,
       )
-      .bind(
-        meta.id,
-        conversationId,
-        userId,
-        meta.kind,
-        meta.mimeType,
-        meta.sizeBytes,
-        meta.name,
-        meta.width,
-        meta.height,
-        meta.durationMs,
-        meta.waveform ? JSON.stringify(meta.waveform) : null,
-        meta.preview,
-        Date.now(),
-      )
+      .bind(meta.id, conversationId, userId, meta.mimeType, meta.sizeBytes, Date.now())
       .run();
-    return c.json<AttachmentMeta>(meta, 201);
+    return c.json<StoredAttachment>(meta, 201);
   })
 
   .post('/:id/messages', async (c) => {
-    const req = await parseJson(c, SendMessageRequest);
+    const req = await parseJson(c, SendMessageRequest, BODY_LIMITS.message);
     const { userId, deviceId } = c.get('auth');
+    await limitUser(c.env, RULES.sendMessage, userId);
     const conversationId = c.req.param('id');
     const message = unwrap(
       await room(c.env, conversationId).post({
         conversationId,
         senderId: userId,
         senderDeviceId: deviceId,
+        senderDevice: await signalDeviceId(c.env.DB, deviceId),
         id: req.id,
-        body: req.body,
-        replyToId: req.replyToId ?? null,
+        kind: req.kind,
+        envelopes: req.envelopes,
         attachmentId: req.attachmentId ?? null,
+        targetId: req.targetId ?? null,
       }),
     );
     return c.json<Message>(message, 201);
-  })
-
-  /** My reaction (one per person); `{emoji: null}` removes it. */
-  .put('/:id/messages/:messageId/reaction', async (c) => {
-    const { emoji } = await parseJson(c, SetReactionRequest);
-    const conversationId = c.req.param('id');
-    return c.json<Message>(
-      unwrap(
-        await room(c.env, conversationId).react({
-          conversationId,
-          userId: c.get('auth').userId,
-          messageId: c.req.param('messageId'),
-          emoji,
-        }),
-      ),
-    );
   })
 
   /** Delete for everyone (sender, or a group admin). */
@@ -288,6 +269,7 @@ export const conversations = new Hono<AppEnv>()
         await room(c.env, conversationId).remove({
           conversationId,
           userId: c.get('auth').userId,
+          deviceId: c.get('auth').deviceId,
           messageId: c.req.param('messageId'),
         }),
       ),

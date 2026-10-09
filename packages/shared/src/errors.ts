@@ -18,6 +18,8 @@ export const ApiErrorBody = z.object({
     code: ApiErrorCode,
     message: z.string(),
     requestId: z.string().optional(),
+    /** Machine-readable specifics (e.g. which devices a send missed). */
+    details: z.unknown().optional(),
   }),
 });
 export type ApiErrorBody = z.infer<typeof ApiErrorBody>;

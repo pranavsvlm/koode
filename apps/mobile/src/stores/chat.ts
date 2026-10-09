@@ -19,6 +19,7 @@ import {
   type Reaction,
 } from '@/domain/types';
 import { callApi, callController, setCallIdentity } from '@/features/calls';
+import { resetDeviceCrypto } from '@/features/crypto';
 import { clearMediaFiles } from '@/features/media/files';
 import type { UploadDraft } from '@/features/media/process';
 import {
@@ -194,6 +195,7 @@ export function liveAttachment(m: LocalMessage, progress?: number): Attachment |
     preview: meta.preview ?? null,
     hasPoster: m.attachment?.hasThumbnail ?? false,
     progress: m.state === 'pending' ? progress : undefined,
+    secret: m.attachment?.secret,
   };
   switch (meta.kind) {
     case 'image':
@@ -255,22 +257,27 @@ export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRea
     id === me ? (start ? 'You' : 'you') : (contacts[id]?.displayName ?? 'Someone');
   const messages: Record<string, Message[]> = {};
   for (const [convId, list] of Object.entries(snap.messages)) {
-    messages[convId] = list.map((m) => {
-      const deleted = m.deletedAt !== null || overlay.deleted[m.id] === true;
-      return {
-        id: m.id,
-        conversationId: m.conversationId,
-        senderId: mapId(m.senderId),
-        text: deleted || !m.body ? undefined : m.body,
-        attachment: deleted ? undefined : liveAttachment(m, snap.progress[m.id]),
-        createdAt: m.createdAt,
-        status: m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered',
-        replyToId: m.replyToId ?? undefined,
-        reactions: deleted ? [] : groupReactions(m.reactions, mapId),
-        deleted,
-        system: m.kind === 'system' && m.system ? systemText(m.system, name) : undefined,
-      };
-    });
+    // Reactions are messages too (encrypted), but show only on their target.
+    messages[convId] = list
+      .filter((m) => m.kind !== 'reaction')
+      .map((m) => {
+        const deleted = m.deletedAt !== null || overlay.deleted[m.id] === true;
+        return {
+          id: m.id,
+          conversationId: m.conversationId,
+          senderId: mapId(m.senderId),
+          text: deleted || !m.body ? undefined : m.body,
+          attachment: deleted ? undefined : liveAttachment(m, snap.progress[m.id]),
+          createdAt: m.createdAt,
+          status:
+            m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered',
+          replyToId: m.replyToId ?? undefined,
+          reactions: deleted ? [] : groupReactions(m.reactions, mapId),
+          deleted,
+          undecryptable: !deleted && m.undecryptable ? m.undecryptable : undefined,
+          system: m.kind === 'system' && m.system ? systemText(m.system, name) : undefined,
+        };
+      });
   }
   return { contacts, conversations, messages, hasMore: snap.hasMore, connection: snap.connection };
 }
@@ -362,6 +369,8 @@ export const useChat = create<ChatState>((set, get) => {
       if (engine) await engine.reset();
       else await clearMessageCache().catch(() => {});
       clearMediaFiles();
+      // Keys and sessions belong to this sign-in; a new one starts afresh.
+      await resetDeviceCrypto().catch(() => {});
       engine = null;
       engineMe = null;
       set({
@@ -706,6 +715,7 @@ export function summarizeConversations(
 export function messagePreview(m: Message | undefined): string {
   if (!m) return 'No messages yet';
   if (m.deleted) return 'Message deleted';
+  if (m.undecryptable) return '🔒 Message';
   if (m.text) return m.text;
   switch (m.attachment?.kind) {
     case 'image':

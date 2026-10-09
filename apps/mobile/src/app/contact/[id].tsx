@@ -19,6 +19,7 @@ import { detailOptions } from '@/navigation/options';
 import { useChat } from '@/stores/chat';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import { startCall } from '@/features/calls/startCall';
+import { useSafety } from '@/features/crypto/useSafety';
 
 function Action({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
   return (
@@ -44,6 +45,7 @@ export default function ContactScreen() {
   const contact = useChat((s) => s.contacts[id]);
   const conversations = useChat((s) => s.conversations);
   const messages = useChat((s) => s.messages);
+  const safety = useSafety(id);
 
   const direct = useMemo(
     () => Object.values(conversations).find((c) => c.kind === 'direct' && c.memberIds.includes(id)),
@@ -131,13 +133,21 @@ export default function ContactScreen() {
 
       <ListSection
         title="Security"
-        footer="Safety numbers let you confirm you’re talking to the right person. They’ll be available once end-to-end encryption ships."
+        footer="Messages and calls with this person are end-to-end encrypted. Compare safety numbers to confirm nobody is in the middle."
       >
         <ListRow
           icon="shield"
-          iconTint="text-tertiary"
+          iconTint={safety.verification === 'changed' ? 'warning' : 'accent'}
           title="Verify Safety Number"
-          subtitle="Not available yet"
+          subtitle={
+            safety.verification === 'verified'
+              ? 'Verified'
+              : safety.verification === 'changed'
+                ? 'Safety number changed'
+                : undefined
+          }
+          accessory={{ type: 'chevron' }}
+          onPress={() => router.push({ pathname: '/safety/[id]', params: { id: contact.id } })}
         />
       </ListSection>
 

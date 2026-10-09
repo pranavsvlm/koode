@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { Call } from './calls';
-import { AttachmentMeta } from './media';
+import { OutgoingEnvelope, Envelope } from './keys';
+import { StoredAttachment } from './media';
 
 /** Client-generated message id (UUID v4). Makes sends idempotent across retries. */
 export const MessageId = z
@@ -18,23 +19,32 @@ export const MessageBody = z
   .transform((s) => s.trim())
   .pipe(z.string().min(1, 'Message is empty').max(MAX_MESSAGE_LENGTH, 'Message is too long'));
 
+/** Most envelopes in one send: every device of every member of a full group. */
+export const MAX_ENVELOPES = 1024;
+
+/**
+ * Send a message: one ciphertext per recipient device (every device of every
+ * member, including my own other devices, but not this one). The server
+ * checks the envelopes cover exactly the current devices (409 with a
+ * DeviceMismatch otherwise). Plaintext is never accepted.
+ */
 export const SendMessageRequest = z
   .object({
     id: MessageId,
-    /** Caption for attachments (may be empty then). */
-    body: z
-      .string()
-      .max(MAX_MESSAGE_LENGTH * 2)
-      .transform((s) => s.trim())
-      .pipe(z.string().max(MAX_MESSAGE_LENGTH, 'Message is too long'))
-      .default(''),
-    replyToId: MessageId.nullable().optional(),
-    /** An attachment uploaded to this conversation and not yet sent. */
+    kind: z.enum(['text', 'attachment', 'reaction']),
+    envelopes: z.array(OutgoingEnvelope).max(MAX_ENVELOPES),
+    /** kind = attachment: an encrypted upload to this conversation, not yet sent. */
     attachmentId: z.string().min(1).max(64).nullable().optional(),
+    /** kind = reaction: the message reacted to. */
+    targetId: MessageId.nullable().optional(),
   })
-  .refine((m) => m.body.length > 0 || !!m.attachmentId, {
-    message: 'Message is empty',
-    path: ['body'],
+  .refine((m) => (m.kind === 'attachment') === !!m.attachmentId, {
+    message: 'Attachment messages need an attachment (and only they may have one)',
+    path: ['attachmentId'],
+  })
+  .refine((m) => (m.kind === 'reaction') === !!m.targetId, {
+    message: 'Reactions need a target (and only they may have one)',
+    path: ['targetId'],
   });
 export type SendMessageRequest = z.input<typeof SendMessageRequest>;
 
@@ -47,27 +57,36 @@ export const SystemEvent = z.object({
 });
 export type SystemEvent = z.infer<typeof SystemEvent>;
 
+/** A reaction as shown (aggregated on the device from encrypted reaction messages). */
 export const Reaction = z.object({ userId: z.string(), emoji: z.string() });
 export type Reaction = z.infer<typeof Reaction>;
 
 export const Message = z.object({
   id: z.string(),
+  /** 'signal': content is in `envelopes`; 'none': plaintext from before Phase 8. */
+  encryption: z.enum(['none', 'signal']),
   conversationId: z.string(),
   /** Per-conversation sequence assigned by the server; strictly increasing, may have gaps. */
   seq: z.number().int().positive(),
   /**
    * Per-conversation revision, bumped whenever the message changes (sent,
-   * reacted to, deleted). Catch-up asks for everything after a revision.
+   * deleted). Catch-up asks for everything after a revision.
    */
   rev: z.number().int().nonnegative(),
   senderId: z.string(),
-  kind: z.enum(['text', 'attachment', 'system']),
-  /** Text, or the caption of an attachment. Empty once deleted. */
+  /** The sender's Signal device number (null for plaintext and system messages). */
+  senderDevice: z.number().int().nullable(),
+  kind: z.enum(['text', 'attachment', 'system', 'reaction']),
+  /** Plaintext messages only: text or caption. Encrypted ones keep it in the envelope. */
   body: z.string(),
   replyToId: z.string().nullable(),
-  attachment: AttachmentMeta.nullable(),
+  /** The stored file: for encrypted messages only its id, size and whether a poster exists. */
+  attachment: StoredAttachment.nullable(),
   system: SystemEvent.nullable(),
-  reactions: z.array(Reaction),
+  /** kind = reaction: the message reacted to. */
+  targetId: z.string().nullable(),
+  /** Ciphertexts for the reader's own devices (each device decrypts its own). */
+  envelopes: z.array(Envelope),
   /** Deleted for everyone (content removed; the message stays as a marker). */
   deletedAt: z.number().int().nullable(),
   /** Server receive time (epoch ms). */
@@ -119,17 +138,6 @@ export const AddMembersRequest = z.object({
   userIds: z.array(z.string().min(1).max(64)).min(1).max(MAX_GROUP_MEMBERS),
 });
 export const UpdateMemberRequest = z.object({ role: z.enum(['member', 'admin']) });
-
-/** One reaction per person per message; null removes mine. */
-export const SetReactionRequest = z.object({
-  emoji: z
-    .string()
-    .min(1)
-    .max(16)
-    .regex(/^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\u200D|\uFE0F)+$/u, 'Not an emoji')
-    .refine((s) => /\p{Extended_Pictographic}/u.test(s), 'Not an emoji')
-    .nullable(),
-});
 
 export const ReceiptRequest = z
   .object({

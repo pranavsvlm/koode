@@ -6,3 +6,4 @@ export * from './messaging';
 export * from './calls';
 export * from './push';
 export * from './media';
+export * from './keys';

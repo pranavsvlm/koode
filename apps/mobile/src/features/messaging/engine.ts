@@ -1,21 +1,29 @@
 import {
+  DeviceMismatch,
+  Payload,
   ServerEvent,
-  type AttachmentMeta,
   type Call,
   type ConversationSummary,
-  type CreateAttachmentRequest,
   type CreateConversationRequest,
+  type CreateEncryptedAttachmentRequest,
+  type DeviceMismatch as Mismatch,
+  type Envelope,
   type Message,
   type MessagePage,
+  type OutgoingEnvelope,
   type PublicUser,
   type ReceiptRequest,
+  type SendMessageRequest,
+  type StoredAttachment,
 } from '@koode/shared';
 import { ApiClientError } from '@/lib/api';
 import {
   normalizeMessage,
+  type LocalAttachment,
   type LocalMessage,
   type LocalUpload,
   type MessagingStore,
+  type SealedFile,
   type Snapshot,
 } from './types';
 
@@ -29,16 +37,13 @@ export type MessagingApi = {
     id: string,
     cursor: { before?: number; after?: number; changedSince?: number; limit?: number },
   ) => Promise<MessagePage>;
-  send: (
-    id: string,
-    body: { id: string; body: string; replyToId?: string | null; attachmentId?: string | null },
-  ) => Promise<Message>;
+  send: (id: string, body: SendMessageRequest) => Promise<Message>;
   receipts: (id: string, body: ReceiptRequest) => Promise<unknown>;
   createConversation: (body: CreateConversationRequest) => Promise<ConversationSummary>;
   createAttachment: (
     conversationId: string,
-    body: CreateAttachmentRequest,
-  ) => Promise<AttachmentMeta>;
+    body: CreateEncryptedAttachmentRequest,
+  ) => Promise<StoredAttachment>;
   /** PUT a local file as the attachment's content or (video) poster. */
   upload: (
     attachmentId: string,
@@ -46,7 +51,6 @@ export type MessagingApi = {
     file: { uri: string; mimeType: string },
     onProgress: (fraction: number) => void,
   ) => Promise<void>;
-  react: (conversationId: string, messageId: string, emoji: string | null) => Promise<Message>;
   deleteMessage: (conversationId: string, messageId: string) => Promise<Message>;
   renameGroup: (conversationId: string, title: string) => Promise<ConversationSummary>;
   addMembers: (conversationId: string, userIds: string[]) => Promise<ConversationSummary>;
@@ -67,9 +71,23 @@ export type SocketLike = {
   onclose: ((code: number) => void) | null;
 };
 
+/** End-to-end encryption for messages (libsignal in the app, a fake in tests). */
+export type MessageCrypto = {
+  /** This device's Signal number (its envelope in each message). */
+  deviceId: () => Promise<number>;
+  /** Encrypt for every device of these people except this one. */
+  encrypt: (userIds: string[], plaintext: string) => Promise<OutgoingEnvelope[]>;
+  decrypt: (senderId: string, senderDevice: number, envelope: Envelope) => Promise<string>;
+  /** Devices changed (a send was refused): reload those people's device lists. */
+  refresh: (mismatch: Mismatch | null, userIds?: string[]) => Promise<void>;
+};
+
 export type EngineDeps = {
   me: string;
   api: MessagingApi;
+  crypto: MessageCrypto;
+  /** Encrypt a file for upload (a fresh key per file). */
+  sealFile: (uri: string) => Promise<SealedFile>;
   connect: (accessToken: string) => SocketLike;
   store: MessagingStore;
   uuid: () => string;
@@ -80,7 +98,7 @@ export type EngineDeps = {
   /** Call signalling arrives on the same socket; the call controller handles it. */
   onCall?: (call: Call) => void;
   /** A file was sent: the app may keep it as the cached copy of the attachment. */
-  onUploaded?: (upload: LocalUpload, attachment: AttachmentMeta) => void;
+  onUploaded?: (upload: LocalUpload, attachment: LocalAttachment) => void;
   /** A pending upload was cancelled or failed for good: its outbox files can go. */
   onDiscarded?: (upload: LocalUpload) => void;
   isSignedOutError?: (e: unknown) => boolean;
@@ -104,6 +122,9 @@ const PING = JSON.stringify({ type: 'ping' });
 
 /** Outbox failures worth retrying later (offline, server hiccup, auth renewal). */
 function isTransient(e: unknown): boolean {
+  // A changed safety number or lost keys need the user, not a retry.
+  if (e instanceof Error && (e.name === 'IdentityChangedError' || e.name === 'KeysLostError'))
+    return false;
   if (!(e instanceof ApiClientError)) return true;
   return (
     e.code === 'network' ||
@@ -119,7 +140,113 @@ const bySeq = (a: LocalMessage, b: LocalMessage) =>
   (a.seq ?? Number.MAX_SAFE_INTEGER) - (b.seq ?? Number.MAX_SAFE_INTEGER) ||
   a.createdAt - b.createdAt;
 
-const fromServer = (m: Message): LocalMessage => ({ ...m, state: 'sent' });
+/** The server's view of a message (ordering, deletion), without content. */
+const serverFields = (m: Message) => ({
+  id: m.id,
+  conversationId: m.conversationId,
+  seq: m.seq,
+  rev: m.rev,
+  senderId: m.senderId,
+  kind: m.kind,
+  system: m.system,
+  targetId: m.targetId,
+  deletedAt: m.deletedAt,
+  createdAt: m.createdAt,
+  state: 'sent' as const,
+});
+
+/** A plaintext message from before end-to-end encryption, or a system message. */
+const plaintext = (m: Message): LocalMessage => ({
+  ...serverFields(m),
+  body: m.body,
+  replyToId: m.replyToId,
+  attachment:
+    m.attachment && m.attachment.kind !== 'encrypted'
+      ? { ...m.attachment, kind: m.attachment.kind }
+      : null,
+  reactions: [],
+});
+
+const MAX_SEND_ATTEMPTS = 3;
+
+/** A 409 telling the sender which devices it missed or shouldn't have addressed. */
+function mismatchOf(e: unknown): Mismatch | null {
+  if (!(e instanceof ApiClientError) || e.code !== 'conflict') return null;
+  const parsed = DeviceMismatch.safeParse(e.details);
+  return parsed.success ? parsed.data : null;
+}
+
+/** What a send says, inside the envelopes. */
+function payloadFor(m: LocalMessage, upload: LocalUpload | null): Payload {
+  const bound = { v: 1 as const, id: m.id, conversationId: m.conversationId };
+  if (m.kind === 'reaction')
+    return { ...bound, t: 'reaction', targetId: m.targetId!, emoji: m.body || null };
+  if (!upload) return { ...bound, t: 'text', body: m.body, replyToId: m.replyToId };
+  const r = upload.request;
+  return {
+    ...bound,
+    t: 'attachment',
+    body: m.body,
+    replyToId: m.replyToId,
+    attachment: {
+      kind: r.kind,
+      mimeType: r.mimeType,
+      sizeBytes: r.sizeBytes,
+      name: r.kind === 'document' ? r.name : null,
+      width: r.kind === 'image' || r.kind === 'video' ? r.width : null,
+      height: r.kind === 'image' || r.kind === 'video' ? r.height : null,
+      durationMs: r.kind === 'video' || r.kind === 'voice' ? r.durationMs : null,
+      waveform: r.kind === 'voice' ? r.waveform : null,
+      preview: r.kind === 'image' || r.kind === 'video' ? (r.preview ?? null) : null,
+      content: { key: upload.sealed!.key, digest: upload.sealed!.digest },
+      thumbnail: upload.posterSealed
+        ? { key: upload.posterSealed.key, digest: upload.posterSealed.digest }
+        : null,
+    },
+  };
+}
+
+/** The attachment as shown, from a decrypted (or just-sent) payload. */
+function attachmentFrom(
+  p: Extract<Payload, { t: 'attachment' }>,
+  stored: StoredAttachment,
+): LocalAttachment {
+  const a = p.attachment;
+  return {
+    id: stored.id,
+    kind: a.kind,
+    mimeType: a.mimeType,
+    sizeBytes: a.sizeBytes,
+    name: a.name,
+    width: a.width,
+    height: a.height,
+    durationMs: a.durationMs,
+    waveform: a.waveform,
+    preview: a.preview,
+    hasThumbnail: stored.hasThumbnail && !!a.thumbnail,
+    secret: { content: a.content, thumbnail: a.thumbnail },
+  };
+}
+
+/** Content fields of a message (what decryption or sending provides). */
+function contentOf(p: Payload, m: Message): Partial<LocalMessage> | null {
+  if (p.t === 'call' || p.id !== m.id || p.conversationId !== m.conversationId) return null;
+  if (p.t !== m.kind) return null;
+  switch (p.t) {
+    case 'text':
+      return { body: p.body.trim(), replyToId: p.replyToId, attachment: null };
+    case 'attachment':
+      if (!m.attachment) return null;
+      return {
+        body: p.body.trim(),
+        replyToId: p.replyToId,
+        attachment: attachmentFrom(p, m.attachment),
+      };
+    case 'reaction':
+      if (p.targetId !== m.targetId) return null;
+      return { body: p.emoji ?? '', replyToId: null, attachment: null };
+  }
+}
 
 /** Native module errors wrap the real reason in `cause`. */
 function describeError(e: unknown): string {
@@ -161,6 +288,9 @@ export class MessagingEngine {
   private lastTypingSent = new Map<string, number>();
   private typingExpiry = new Map<string, Map<string, number>>();
   private typingTimer: unknown = null;
+  /** Server messages are opened in arrival order, one batch at a time. */
+  private inbox: Promise<unknown> = Promise.resolve();
+  private myDevice: number | null = null;
 
   constructor(deps: EngineDeps) {
     this.deps = {
@@ -357,15 +487,22 @@ export class MessagingEngine {
       return;
     }
     switch (event.type) {
-      case 'message':
-        this.ingest([fromServer(event.message)]);
-        if (!this.findConversation(event.message.conversationId))
-          void this.syncConversation(event.message.conversationId);
-        else this.bumpConversation(event.message);
-        if (event.message.senderId !== this.deps.me)
-          this.queueAck(event.message.conversationId, { delivered: event.message.seq });
-        this.clearTyping(event.message.conversationId, event.message.senderId);
+      case 'message': {
+        const m = event.message;
+        void this.receive([m]).then(
+          () => {
+            if (!this.findConversation(m.conversationId))
+              void this.syncConversation(m.conversationId);
+            else this.bumpConversation(m);
+            if (m.senderId !== this.deps.me && m.kind !== 'reaction')
+              this.queueAck(m.conversationId, { delivered: m.seq });
+          },
+          // Couldn't get ready to decrypt (offline): catch-up fetches it again.
+          () => undefined,
+        );
+        this.clearTyping(m.conversationId, m.senderId);
         break;
+      }
       case 'receipt':
         this.applyReceipt(event.conversationId, event.userId, event.deliveredSeq, event.readSeq);
         break;
@@ -399,8 +536,11 @@ export class MessagingEngine {
   async sync(): Promise<void> {
     let list: ConversationSummary[];
     try {
+      // Keys must be ready before messages can be opened (publishes them on first run).
+      await this.ensureDevice();
       list = await this.deps.api.conversations();
-    } catch {
+    } catch (e) {
+      if (__DEV__) console.warn(`[messaging] sync failed: ${describeError(e)}`);
       return;
     }
     await this.cache((st) => st.saveConversations(list));
@@ -442,7 +582,7 @@ export class MessagingEngine {
         if (c.lastSeq === 0) return;
         // New to this device: fetch the newest page; older history loads on scroll.
         const page = await this.deps.api.messages(c.id, { limit: PAGE });
-        this.ingest(page.messages.map(fromServer));
+        await this.receive(page.messages);
         this.emit({ hasMore: { ...this.snapshot.hasMore, [c.id]: page.hasMore } });
       } else {
         let since = local.reduce((m, x) => Math.max(m, x.rev ?? 0), 0);
@@ -451,15 +591,13 @@ export class MessagingEngine {
         const oldest = local.reduce((m, x) => Math.min(m, x.seq!), Number.MAX_SAFE_INTEGER);
         for (let i = 0; i < SYNC_PAGES_PER_CONVERSATION; i++) {
           const page = await this.deps.api.messages(c.id, { changedSince: since, limit: PAGE });
-          this.ingest(
-            page.messages.filter((m) => known.has(m.id) || m.seq >= oldest).map(fromServer),
-          );
+          await this.receive(page.messages.filter((m) => known.has(m.id) || m.seq >= oldest));
           since = page.messages.at(-1)?.rev ?? since;
           if (!page.hasMore) break;
         }
       }
       const received = (this.snapshot.messages[c.id] ?? []).filter(
-        (m) => m.senderId !== this.deps.me && m.seq,
+        (m) => m.senderId !== this.deps.me && m.seq && m.kind !== 'reaction',
       );
       const top = received.reduce((m, x) => Math.max(m, x.seq ?? 0), 0);
       if (top > 0) this.queueAck(c.id, { delivered: top });
@@ -481,10 +619,106 @@ export class MessagingEngine {
         before: minSeq === Number.MAX_SAFE_INTEGER ? undefined : minSeq,
         limit: PAGE,
       });
-      this.ingest(page.messages.map(fromServer));
+      await this.receive(page.messages);
       this.emit({ hasMore: { ...this.snapshot.hasMore, [conversationId]: page.hasMore } });
     } catch {
       // offline: try again on next scroll
+    }
+  }
+
+  // ——— Opening (decrypting) messages ———
+
+  private async ensureDevice(): Promise<number> {
+    this.myDevice ??= await this.deps.crypto.deviceId();
+    return this.myDevice;
+  }
+
+  /**
+   * Open server messages and merge them in. Batches run one after another in
+   * arrival order (the same message may come over the socket and in a
+   * catch-up page; it's decrypted once). Rejects only if this device isn't
+   * ready to decrypt (offline at start-up); nothing is merged then.
+   */
+  private receive(messages: Message[]): Promise<void> {
+    const run = this.inbox.then(async () => {
+      if (messages.length === 0) return;
+      await this.ensureDevice();
+      const cached = new Map(
+        (
+          await this.deps.store
+            .getMessages(messages.filter((m) => !this.findLocal(m)).map((m) => m.id))
+            .catch(() => [])
+        ).map((m) => [m.id, normalizeMessage(m)]),
+      );
+      const opened: LocalMessage[] = [];
+      for (const m of messages)
+        opened.push(await this.open(m, this.findLocal(m) ?? cached.get(m.id)));
+      this.ingest(opened);
+    });
+    this.inbox = run.catch(() => undefined);
+    return run;
+  }
+
+  private findLocal(m: { id: string; conversationId: string }): LocalMessage | undefined {
+    return (this.snapshot.messages[m.conversationId] ?? []).find((x) => x.id === m.id);
+  }
+
+  /** A server message → the local copy, decrypting it if this device hasn't yet. */
+  private async open(m: Message, local: LocalMessage | undefined): Promise<LocalMessage> {
+    if (m.encryption === 'none') return plaintext(m);
+    const keep = local ? { reactions: local.reactions, upload: undefined } : { reactions: [] };
+    if (m.deletedAt !== null) {
+      return {
+        ...(local ?? { reactions: [] }),
+        ...serverFields(m),
+        body: '',
+        replyToId: null,
+        attachment: null,
+        reactions: [],
+        upload: undefined,
+        opened: true,
+        undecryptable: null,
+      };
+    }
+    // Still in this device's outbox: the send's own response completes it.
+    if (local && local.state !== 'sent') return local;
+    // Already readable here (sent from this device, or decrypted before).
+    if (local?.opened) {
+      return {
+        ...local,
+        ...serverFields(m),
+        ...keep,
+        attachment: local.attachment && {
+          ...local.attachment,
+          id: m.attachment?.id ?? local.attachment.id,
+          hasThumbnail:
+            (m.attachment?.hasThumbnail ?? false) && !!local.attachment.secret?.thumbnail,
+        },
+      };
+    }
+    if (local?.undecryptable) return { ...local, ...serverFields(m), ...keep };
+
+    const base: LocalMessage = {
+      ...serverFields(m),
+      body: '',
+      replyToId: null,
+      attachment: null,
+      ...keep,
+    };
+    const device = this.myDevice!;
+    const envelope = m.envelopes.find((e) => e.deviceId === device);
+    if (!envelope || m.senderDevice === null) return { ...base, undecryptable: 'missing' };
+    try {
+      const text = await this.deps.crypto.decrypt(m.senderId, m.senderDevice, envelope);
+      const payload = Payload.safeParse(JSON.parse(text));
+      const content = payload.success ? contentOf(payload.data, m) : null;
+      // Wrong shape, or names another message / chat: the server moved it.
+      if (!content) return { ...base, undecryptable: 'failed' };
+      return { ...base, ...content, opened: true, undecryptable: null };
+    } catch (e) {
+      if (__DEV__) console.warn(`[messaging] couldn't decrypt ${m.id}: ${describeError(e)}`);
+      const identity = /identity/i.test(describeError(e));
+      return { ...base, undecryptable: identity ? 'identity' : 'failed' };
     }
   }
 
@@ -495,6 +729,9 @@ export class MessagingEngine {
   }
 
   private async upsertConversation(summary: ConversationSummary) {
+    // Someone new (just joined Koode, or added to a group): learn their name.
+    if (summary.members.some((m) => !this.snapshot.users[m.userId] && m.userId !== this.deps.me))
+      void this.refreshUsers();
     await this.cache((st) => st.saveConversations([summary]));
     const others = this.snapshot.conversations.filter((c) => c.id !== summary.id);
     this.emit({ conversations: sortConversations([...others, summary]) });
@@ -513,6 +750,7 @@ export class MessagingEngine {
   }
 
   private bumpConversation(m: Message) {
+    if (m.kind === 'reaction') return; // not activity
     this.patchConversation(m.conversationId, (c) => ({
       ...c,
       lastSeq: Math.max(c.lastSeq, m.seq),
@@ -529,7 +767,7 @@ export class MessagingEngine {
   private ingest(incoming: LocalMessage[]) {
     if (incoming.length === 0) return;
     const messages = { ...this.snapshot.messages };
-    const changed: LocalMessage[] = [];
+    const changed = new Map<string, LocalMessage>();
     for (const m of incoming) {
       const list = messages[m.conversationId] ?? [];
       const i = list.findIndex((x) => x.id === m.id);
@@ -543,11 +781,19 @@ export class MessagingEngine {
       } else {
         messages[m.conversationId] = [...list, m];
       }
-      changed.push(m);
+      changed.set(m.id, m);
     }
-    for (const id of new Set(changed.map((m) => m.conversationId)))
-      messages[id] = [...messages[id]!].sort(bySeq);
-    void this.cache((st) => st.saveMessages(changed));
+    for (const id of new Set([...changed.values()].map((m) => m.conversationId))) {
+      const touched = new Set(
+        [...changed.values()]
+          .filter((m) => m.conversationId === id)
+          .map((m) => (m.kind === 'reaction' ? m.targetId! : m.id)),
+      );
+      messages[id] = withReactions([...messages[id]!].sort(bySeq), touched, (m) =>
+        changed.set(m.id, m),
+      );
+    }
+    void this.cache((st) => st.saveMessages([...changed.values()]));
     this.emit({ messages });
   }
 
@@ -644,6 +890,7 @@ export class MessagingEngine {
       replyToId,
       createdAt: this.deps.now(),
       state: 'pending',
+      opened: true,
       upload: upload && { ...upload, attachmentId: null, posterUploaded: false, uploaded: false },
     });
     this.ingest([message]);
@@ -683,22 +930,18 @@ export class MessagingEngine {
       for (;;) {
         const next = Object.values(this.snapshot.messages)
           .flat()
-          .filter((m) => m.state === 'pending')
+          .filter((m) => m.state === 'pending' && m.kind !== 'reaction')
           .sort((a, b) => a.createdAt - b.createdAt)[0];
         if (!next) break;
         try {
           const upload = next.upload ? await this.uploadFor(next) : null;
-          const saved = await this.deps.api.send(next.conversationId, {
-            id: next.id,
-            body: next.body,
-            replyToId: next.replyToId,
-            attachmentId: upload?.attachmentId ?? null,
-          });
-          this.ingest([fromServer(saved)]);
+          const { saved, sent } = await this.deliver(next, upload);
+          this.ingest([sent]);
           this.bumpConversation(saved);
           this.setProgress(next.id, null);
-          if (upload && saved.attachment) this.deps.onUploaded?.(upload, saved.attachment);
+          if (upload && sent.attachment) this.deps.onUploaded?.(upload, sent.attachment);
         } catch (e) {
+          if (__DEV__) console.warn(`[messaging] send failed: ${describeError(e)}`);
           if (isTransient(e)) {
             this.flushAgain = false;
             return; // stays pending; retried on reconnect/resume
@@ -706,6 +949,60 @@ export class MessagingEngine {
           this.setProgress(next.id, null);
           this.ingest([{ ...this.current(next), state: 'failed' }]);
         }
+      }
+    }
+  }
+
+  /** Members to encrypt for (fetching the conversation if it isn't known yet). */
+  private async membersOf(conversationId: string, fresh = false): Promise<string[]> {
+    let c = fresh ? undefined : this.findConversation(conversationId);
+    if (!c) {
+      c = await this.deps.api.conversation(conversationId);
+      await this.upsertConversation(c);
+    }
+    return c.members.map((m) => m.userId);
+  }
+
+  /**
+   * Encrypt for every current device of every member and send. If devices
+   * changed (someone added a phone, left the group …), the server says which
+   * and the message is encrypted again for the right set.
+   */
+  private async deliver(
+    m: LocalMessage,
+    upload: LocalUpload | null,
+  ): Promise<{ saved: Message; sent: LocalMessage }> {
+    const payload = payloadFor(m, upload);
+    const plain = JSON.stringify(payload);
+    let fresh = false;
+    for (let attempt = 1; ; attempt++) {
+      const members = await this.membersOf(m.conversationId, fresh);
+      const envelopes = await this.deps.crypto.encrypt(members, plain);
+      try {
+        const saved = await this.deps.api.send(m.conversationId, {
+          id: m.id,
+          kind: m.kind === 'reaction' ? 'reaction' : upload ? 'attachment' : 'text',
+          envelopes,
+          attachmentId: upload?.attachmentId ?? null,
+          targetId: m.targetId ?? null,
+        });
+        const content = contentOf(payload, saved);
+        return {
+          saved,
+          sent: {
+            ...m,
+            ...serverFields(saved),
+            ...content,
+            upload: undefined,
+            opened: true,
+            undecryptable: null,
+          },
+        };
+      } catch (e) {
+        const mismatch = mismatchOf(e);
+        if (!mismatch || attempt >= MAX_SEND_ATTEMPTS) throw e;
+        await this.deps.crypto.refresh(mismatch, members);
+        fresh = true; // membership may have changed too
       }
     }
   }
@@ -725,23 +1022,34 @@ export class MessagingEngine {
   }
 
   /**
-   * Create → (poster) → content, skipping steps already done. An expired
-   * upload (unsent for a day; the server cleans those up) starts again.
+   * Encrypt → create → (poster) → content, skipping steps already done. The
+   * server only ever receives ciphertext. An expired upload (unsent for a
+   * day; the server cleans those up) starts again from "create".
    */
   private async uploadFor(m: LocalMessage): Promise<LocalUpload> {
     let upload = this.current(m).upload!;
+    if (!upload.sealed) {
+      upload = { ...upload, sealed: await this.deps.sealFile(upload.uri) };
+      this.saveUpload(m, upload);
+    }
+    if (upload.posterUri && !upload.posterSealed) {
+      upload = { ...upload, posterSealed: await this.deps.sealFile(upload.posterUri) };
+      this.saveUpload(m, upload);
+    }
     for (let attempt = 0; ; attempt++) {
       try {
         if (!upload.attachmentId) {
-          const meta = await this.deps.api.createAttachment(m.conversationId, upload.request);
+          const meta = await this.deps.api.createAttachment(m.conversationId, {
+            sizeBytes: upload.sealed!.size,
+          });
           upload = { ...upload, attachmentId: meta.id, posterUploaded: false, uploaded: false };
           this.saveUpload(m, upload);
         }
-        if (upload.posterUri && !upload.posterUploaded) {
+        if (upload.posterSealed && !upload.posterUploaded) {
           await this.deps.api.upload(
             upload.attachmentId!,
             'thumbnail',
-            { uri: upload.posterUri, mimeType: 'image/jpeg' },
+            { uri: upload.posterSealed.uri, mimeType: 'application/octet-stream' },
             () => {},
           );
           upload = { ...upload, posterUploaded: true };
@@ -752,7 +1060,7 @@ export class MessagingEngine {
           await this.deps.api.upload(
             upload.attachmentId!,
             'content',
-            { uri: upload.uri, mimeType: upload.request.mimeType },
+            { uri: upload.sealed!.uri, mimeType: 'application/octet-stream' },
             (f) => this.setProgress(m.id, f),
           );
           upload = { ...upload, uploaded: true };
@@ -787,39 +1095,54 @@ export class MessagingEngine {
 
   // ——— Reactions and deletion (online only) ———
 
-  /** Set or (null) remove my reaction; shown at once, reverted if the server refuses. */
+  /**
+   * Set or (null) remove my reaction: an encrypted message naming its target.
+   * Shown at once; withdrawn if it can't be sent (online only).
+   */
   async react(conversationId: string, messageId: string, emoji: string | null): Promise<void> {
-    const before = (this.snapshot.messages[conversationId] ?? []).find((m) => m.id === messageId);
-    if (!before || before.seq === null) return;
-    const others = before.reactions.filter((r) => r.userId !== this.deps.me);
-    this.replaceLocal({
-      ...before,
-      reactions: emoji ? [...others, { userId: this.deps.me, emoji }] : others,
+    const target = (this.snapshot.messages[conversationId] ?? []).find((m) => m.id === messageId);
+    if (!target || target.seq === null) return;
+    const reaction = normalizeMessage({
+      id: this.deps.uuid(),
+      conversationId,
+      seq: null,
+      senderId: this.deps.me,
+      kind: 'reaction',
+      body: emoji ?? '',
+      targetId: messageId,
+      createdAt: this.deps.now(),
+      state: 'pending',
+      opened: true,
     });
+    this.ingest([reaction]);
     try {
-      this.ingest([fromServer(await this.deps.api.react(conversationId, messageId, emoji))]);
+      this.ingest([(await this.deliver(reaction, null)).sent]);
     } catch (e) {
-      this.replaceLocal(before);
+      this.drop(reaction);
       throw e;
     }
+  }
+
+  /** Remove a local-only message (and recompute what it affected). */
+  private drop(m: LocalMessage) {
+    const list = (this.snapshot.messages[m.conversationId] ?? []).filter((x) => x.id !== m.id);
+    const touched = new Set(m.targetId ? [m.targetId] : []);
+    const changed: LocalMessage[] = [];
+    this.emit({
+      messages: {
+        ...this.snapshot.messages,
+        [m.conversationId]: withReactions(list, touched, (x) => changed.push(x)),
+      },
+    });
+    void this.cache((st) => st.deleteMessages([m.id]));
+    void this.cache((st) => st.saveMessages(changed));
   }
 
   /** Delete for everyone (my message, or as a group admin). */
   async deleteForEveryone(conversationId: string, messageId: string): Promise<void> {
     const saved = await this.deps.api.deleteMessage(conversationId, messageId);
-    this.ingest([fromServer(saved)]);
+    await this.receive([saved]);
     this.bumpConversation(saved);
-  }
-
-  /** Optimistic local edit that ignores revision ordering (reverted on failure). */
-  private replaceLocal(m: LocalMessage) {
-    const list = this.snapshot.messages[m.conversationId] ?? [];
-    this.emit({
-      messages: {
-        ...this.snapshot.messages,
-        [m.conversationId]: list.map((x) => (x.id === m.id ? m : x)),
-      },
-    });
   }
 
   // ——— Receipts ———
@@ -907,6 +1230,39 @@ export class MessagingEngine {
     if (userId === this.deps.me) await this.forgetConversation(conversationId);
     else await this.syncConversation(conversationId);
   }
+}
+
+/**
+ * Recompute `reactions` of the touched messages from the (encrypted)
+ * reaction messages: each person's latest one counts; '' means removed.
+ */
+function withReactions(
+  list: LocalMessage[],
+  touched: Set<string>,
+  onChange: (m: LocalMessage) => void,
+): LocalMessage[] {
+  const latest = new Map<string, LocalMessage>();
+  const order = (m: LocalMessage) => m.seq ?? Number.MAX_SAFE_INTEGER; // pending = newest
+  for (const r of list) {
+    if (r.kind !== 'reaction' || !r.targetId || !touched.has(r.targetId)) continue;
+    if (r.deletedAt !== null || r.undecryptable) continue;
+    const key = `${r.targetId} ${r.senderId}`;
+    const prev = latest.get(key);
+    if (!prev || order(r) >= order(prev)) latest.set(key, r);
+  }
+  return list.map((m) => {
+    if (m.kind === 'reaction' || !touched.has(m.id)) return m;
+    const reactions =
+      m.deletedAt !== null
+        ? []
+        : [...latest.values()]
+            .filter((r) => r.targetId === m.id && r.body)
+            .map((r) => ({ userId: r.senderId, emoji: r.body }));
+    if (JSON.stringify(reactions) === JSON.stringify(m.reactions)) return m;
+    const next = { ...m, reactions };
+    onChange(next);
+    return next;
+  });
 }
 
 function sortConversations(list: ConversationSummary[]): ConversationSummary[] {

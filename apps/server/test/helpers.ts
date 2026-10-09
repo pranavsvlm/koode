@@ -122,6 +122,9 @@ export async function twoUsers() {
     username: 'dan',
     displayName: 'Dan Okafor',
   });
+  // As the app does right after signing in.
+  await publishKeys(maya.session.accessToken);
+  await publishKeys(dan.session.accessToken);
   return { maya: maya.session, dan: dan.session, mayaDevice: maya.device, danDevice: dan.device };
 }
 
@@ -170,3 +173,119 @@ export async function openSocket(token?: string) {
   };
   return { status: res.status, ws, events, next, closed: () => closed } as const;
 }
+
+/** Sign in on another device of an existing account (recovery adds a device). */
+export async function secondDevice(username: string) {
+  const device = await newDevice();
+  const nonce = await challenge('recover');
+  const res = await api('/auth/recover', {
+    body: {
+      username,
+      recoveryKey: RECOVERY_KEY,
+      device: { name: 'iPad', platform: 'ios', signingPublicKey: device.publicKey },
+      nonce,
+      signature: await device.sign(authSigningMessage('recover', nonce, device.publicKey)),
+    },
+  });
+  if (res.status !== 201) throw new Error(`recover failed: ${res.status}`);
+  return res.json as AuthSession;
+}
+
+// ——— End-to-end encryption stand-ins ———
+// The server stores and forwards key material and ciphertext without
+// interpreting it, so tests use recognisable placeholders. Real libsignal
+// interoperability is tested by the app against scripts/e2ee-peer.mjs.
+
+const toB64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+const fromB64 = (b64: string) =>
+  new TextDecoder().decode(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+
+let keySerial = 0;
+const fakeKey = (tag: string) => btoa(`${tag}:${++keySerial}`.padEnd(33, '.'));
+
+/** Publish placeholder keys for the session's device. */
+export function publishKeys(
+  token: string,
+  opts: {
+    identityKey?: string;
+    registrationId?: number;
+    preKeys?: number;
+    kyberPreKeys?: number;
+  } = {},
+) {
+  const range = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+  return api('/keys', {
+    method: 'PUT',
+    token,
+    body: {
+      registrationId: opts.registrationId ?? 1 + (keySerial % 16000),
+      identityKey: opts.identityKey ?? fakeKey('identity'),
+      signedPreKey: { keyId: 1, publicKey: fakeKey('spk'), signature: fakeKey('sig') },
+      kyberPreKey: { keyId: 1000, publicKey: fakeKey('kyber-last'), signature: fakeKey('sig') },
+      preKeys: range(opts.preKeys ?? 2).map((keyId) => ({ keyId, publicKey: fakeKey('pk') })),
+      kyberPreKeys: range(opts.kyberPreKeys ?? 2).map((keyId) => ({
+        keyId,
+        publicKey: fakeKey('kyber'),
+        signature: fakeKey('sig'),
+      })),
+    },
+  });
+}
+
+/** This session's Signal device number. */
+export async function myDevice(token: string): Promise<number> {
+  return (await api('/keys/status', { token })).json.deviceId;
+}
+
+/**
+ * Stand-in envelopes ("<text>" in base64) for every keyed device of these
+ * people, except the sending device.
+ */
+export async function envelopesFor(s: AuthSession, userIds: string[], text: string) {
+  if (userIds.length === 0) return [];
+  const { devices } = (
+    await api(`/keys/devices?userIds=${userIds.join(',')}`, { token: s.accessToken })
+  ).json as { devices: { userId: string; deviceId: number }[] };
+  const mine = await myDevice(s.accessToken);
+  return devices
+    .filter((d) => !(d.userId === s.user.id && d.deviceId === mine))
+    .map((d) => ({ userId: d.userId, deviceId: d.deviceId, type: 3, body: toB64(text) }));
+}
+
+/** Send an "encrypted" message to everyone in the conversation. */
+export async function sendMessage(
+  s: AuthSession,
+  conversationId: string,
+  text: string,
+  opts: {
+    id?: string;
+    kind?: 'text' | 'attachment' | 'reaction';
+    attachmentId?: string;
+    targetId?: string;
+  } = {},
+) {
+  const summary = (await api(`/conversations/${conversationId}`, { token: s.accessToken })).json;
+  const members: string[] = summary?.members?.map((m: { userId: string }) => m.userId) ?? [];
+  return api(`/conversations/${conversationId}/messages`, {
+    token: s.accessToken,
+    body: {
+      id: opts.id ?? uuid(),
+      kind: opts.kind ?? (opts.attachmentId ? 'attachment' : opts.targetId ? 'reaction' : 'text'),
+      envelopes: await envelopesFor(s, members, text),
+      attachmentId: opts.attachmentId,
+      targetId: opts.targetId,
+    },
+  });
+}
+
+/** Start a call, with the media key "encrypted" to the callee's devices. */
+export async function startCall(s: AuthSession, userId: string, kind: 'voice' | 'video' = 'voice') {
+  return api('/calls', {
+    token: s.accessToken,
+    body: { id: uuid(), userId, kind, envelopes: await envelopesFor(s, [userId], 'media-key') },
+  });
+}
+
+/** The stand-in plaintext of a received message (its first envelope). */
+export const opened = (m: { envelopes: { body: string }[] }) =>
+  m.envelopes[0] ? fromB64(m.envelopes[0].body) : null;

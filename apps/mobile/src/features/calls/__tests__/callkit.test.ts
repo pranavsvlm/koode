@@ -36,7 +36,12 @@ const mockCall = (patch: Partial<Call> = {}): Call => ({
   endedAt: null,
   ...patch,
 });
-const join = (c: Call): CallJoin => ({ call: c, media: { url: 'wss://lk', token: 't' } });
+const join = (c: Call): CallJoin & { mediaKey: string } => ({
+  call: c,
+  media: { url: 'wss://lk', token: 't' },
+  key: null,
+  mediaKey: 'bWVkaWEta2V5',
+});
 
 const mockApi = {
   start: jest.fn(),

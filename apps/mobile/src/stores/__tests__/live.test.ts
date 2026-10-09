@@ -111,6 +111,9 @@ describe('deriveLive', () => {
             ],
           },
           { ...msg(3, 'sent', 'usr_b'), body: '', deletedAt: 9 },
+          // Reactions are encrypted messages of their own; never shown as bubbles.
+          { ...msg(4, 'sent', 'usr_b'), kind: 'reaction', targetId: 'm2', body: '❤️' },
+          { ...msg(5, 'sent', 'usr_b'), body: '', undecryptable: 'identity' },
         ],
       },
       users: { usr_b: { id: 'usr_b', username: 'b', displayName: 'Bee', about: '' } },
@@ -147,6 +150,8 @@ describe('deriveLive', () => {
     });
     // Deleted for everyone on the server.
     expect(out.messages.c1![2]).toMatchObject({ deleted: true, text: undefined, reactions: [] });
+    expect(out.messages.c1).toHaveLength(4);
+    expect(out.messages.c1![3]).toMatchObject({ undecryptable: 'identity', text: undefined });
     expect(out.contacts.usr_b).toMatchObject({ displayName: 'Bee', username: 'b' });
     expect(out.hasMore.c1).toBe(true);
   });
@@ -204,9 +209,11 @@ describe('attachments and group changes', () => {
         waveform: [0.1, 0.9],
         preview: null,
         hasThumbnail: false,
+        secret: { content: { key: 'k', digest: 'd' }, thumbnail: null },
       },
     };
     expect(liveAttachment(m)).toMatchObject({
+      secret: { content: { key: 'k', digest: 'd' }, thumbnail: null },
       kind: 'voice',
       attachmentId: 'att_1',
       durationSec: 4.2,

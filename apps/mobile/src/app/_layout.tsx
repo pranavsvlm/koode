@@ -89,6 +89,7 @@ function RootStack() {
         <Stack.Screen name="chat/[id]/index" options={{ headerShown: true }} />
         <Stack.Screen name="chat/[id]/info" options={{ headerShown: true }} />
         <Stack.Screen name="contact/[id]" options={{ headerShown: true }} />
+        <Stack.Screen name="safety/[id]" options={{ headerShown: true }} />
         <Stack.Screen name="new-chat" options={{ presentation: 'modal' }} />
         <Stack.Screen
           name="attach"

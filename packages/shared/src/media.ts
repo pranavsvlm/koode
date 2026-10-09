@@ -37,7 +37,10 @@ const FileName = z
   // eslint-disable-next-line no-control-regex
   .refine((s) => !/[/\\\u0000-\u001f\u007f]/.test(s), 'Invalid file name');
 
-/** Ask to upload a file into a conversation (the content is PUT separately). */
+/**
+ * A file's description before encryption: validated on the device, then sent
+ * inside the encrypted message (the server accepted it directly before Phase 8).
+ */
 export const CreateAttachmentRequest = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('image'),
@@ -83,8 +86,32 @@ export const CreateAttachmentRequest = z.discriminatedUnion('kind', [
 ]);
 export type CreateAttachmentRequest = z.input<typeof CreateAttachmentRequest>;
 
+/** Bytes added by AES-256-GCM (nonce and tag), with room to spare. */
+export const ENCRYPTION_OVERHEAD = 64;
+
 /**
- * Attachment metadata as carried in messages. Never a URL: content is fetched
+ * Start an encrypted upload. The server learns only the ciphertext size and
+ * whether a (also encrypted) video poster follows; everything else about the
+ * file travels inside the message's envelopes.
+ */
+export const CreateEncryptedAttachmentRequest = z
+  .object({
+    sizeBytes: z
+      .number()
+      .int()
+      .positive()
+      .max(
+        Math.max(...Object.values(ATTACHMENT_LIMITS)) + ENCRYPTION_OVERHEAD,
+        'File is too large',
+      ),
+  })
+  // Anything more (type, name, dimensions) would be metadata the server mustn't get.
+  .strict();
+export type CreateEncryptedAttachmentRequest = z.infer<typeof CreateEncryptedAttachmentRequest>;
+
+/**
+ * Attachment metadata as the app shows it (decrypted, or from a plaintext
+ * message sent before Phase 8). Never a URL: content is fetched
  * from `/v1/attachments/:id/content` with the caller's credentials.
  */
 export const AttachmentMeta = z.object({
@@ -101,6 +128,12 @@ export const AttachmentMeta = z.object({
   hasThumbnail: z.boolean(),
 });
 export type AttachmentMeta = z.infer<typeof AttachmentMeta>;
+
+/** An attachment as the server stores it: 'encrypted' for everything since Phase 8. */
+export const StoredAttachment = AttachmentMeta.extend({
+  kind: z.enum(['image', 'video', 'document', 'voice', 'encrypted']),
+});
+export type StoredAttachment = z.infer<typeof StoredAttachment>;
 
 /** Short description of an attachment for previews and notifications. */
 export function attachmentLabel(a: Pick<AttachmentMeta, 'kind' | 'name'>): string {

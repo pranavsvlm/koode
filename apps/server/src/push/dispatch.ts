@@ -8,9 +8,9 @@ import { sendFcm, type FcmMessage } from './fcm';
  * open; devices that do get the same events over the WebSocket and decide in
  * the app whether to show anything.
  *
- * Privacy: payload data never contains message text. Text appears only in the
- * visible notification, and only if that device allows previews. Until Phase 8
- * (E2EE) that text passes through Apple / Google push servers.
+ * Privacy: payload data never contains message text. Messages are end-to-end
+ * encrypted, so alerts say only who wrote ("New message"); legacy plaintext
+ * messages from before Phase 8 could show a preview where a device allows it.
  */
 
 type Registration = {
@@ -121,7 +121,14 @@ export async function pushMessage(
   const group = conversation.kind === 'group';
   const title = group ? (conversation.title ?? 'Group') : senderName;
   if (message.kind === 'system') return; // group changes show in the chat, not as alerts
-  const raw = message.body || (message.attachment ? attachmentLabel(message.attachment) : '');
+  // Encrypted messages: the server can't know what they say.
+  const raw =
+    message.encryption === 'signal'
+      ? ''
+      : message.body ||
+        (message.attachment && message.attachment.kind !== 'encrypted'
+          ? attachmentLabel({ ...message.attachment, kind: message.attachment.kind })
+          : '');
   const text = raw.length > PREVIEW_CHARS ? `${raw.slice(0, PREVIEW_CHARS - 1)}…` : raw;
   const data: PushData = {
     type: 'message',
@@ -131,13 +138,14 @@ export async function pushMessage(
 
   const jobs: Job[] = [];
   for (const r of regs) {
-    const body = r.previews
-      ? group
-        ? `${senderName}: ${text}`
-        : text
-      : group
-        ? `${senderName}: New message`
-        : 'New message';
+    const body =
+      r.previews && text
+        ? group
+          ? `${senderName}: ${text}`
+          : text
+        : group
+          ? `${senderName}: New message`
+          : 'New message';
     const badge = unread.get(r.user_id) ?? 0;
     if (!r.alert_token) continue;
     if (r.platform === 'ios') {

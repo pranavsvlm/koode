@@ -14,18 +14,20 @@ export default function PrivacyScreen() {
 
   return (
     <ScrollView className="bg-background" contentContainerClassName="gap-7 px-4 pb-16 pt-4">
-      {/* Honest status: do not claim E2EE until Phase 8 is verified. */}
+      {/* Honest status: encrypted, but not independently reviewed yet. */}
       <View
         className="flex-row gap-3 rounded-xl bg-warning/15 p-4"
         accessible
-        accessibilityLabel="Encryption status: end-to-end encryption is not enabled yet. Messages are encrypted in transit only. Avoid sensitive conversations for now."
+        accessibilityLabel="Encryption status: end-to-end encrypted with the Signal Protocol, not yet independently reviewed. Avoid highly sensitive conversations for now."
       >
         <Icon name="lock" size={20} color="warning" />
         <View className="flex-1 gap-1">
-          <Text variant="headline">End-to-end encryption is not on yet</Text>
+          <Text variant="headline">End-to-end encrypted, pending review</Text>
           <Text variant="footnote" tone="secondary">
-            Messages and calls are encrypted in transit (TLS) but the server can read them. Avoid
-            sensitive conversations until end-to-end encryption ships.
+            Messages, photos, files, reactions and calls are encrypted on your device with the
+            Signal Protocol; Koode’s server can’t read them. It still sees who you talk to and when.
+            This hasn’t been independently reviewed yet, so avoid highly sensitive conversations for
+            now.
           </Text>
         </View>
       </View>

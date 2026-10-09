@@ -1,3 +1,4 @@
+import type { FileSecret } from '@koode/shared';
 import type { ImageSourcePropType } from 'react-native';
 
 /** The signed-in user's id in conversation membership and message senders. */
@@ -33,6 +34,8 @@ export type MediaRef = {
   hasPoster?: boolean;
   /** Upload progress (0–1) while sending. */
   progress?: number;
+  /** Keys to decrypt the downloaded file and poster (end-to-end encrypted attachments). */
+  secret?: { content: FileSecret; thumbnail: FileSecret | null };
 };
 
 export type Attachment =
@@ -60,6 +63,8 @@ export type Message = {
   replyToId?: string;
   reactions: Reaction[];
   deleted?: boolean;
+  /** Arrived but couldn't be decrypted on this device. */
+  undecryptable?: 'failed' | 'identity' | 'missing';
   /** Group change ("Maya added Dan"), shown as a centred note, not a bubble. */
   system?: string;
 };

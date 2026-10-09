@@ -3,9 +3,13 @@
 Private, invite-only messaging and calling for family and friends. Ad-free,
 tracker-free, built with Expo (iOS and Android) and Cloudflare.
 
-> **Status: early development.** End-to-end encryption is not implemented yet
-> (Phase 8). Do not use Koode for sensitive conversations. See
-> [PROGRESS.md](PROGRESS.md).
+> **Status: early development.** Messages, files and calls are end-to-end
+> encrypted with Signal's libsignal on iOS (Phase 8); Android support for it isn't
+> written yet. The implementation hasn't been independently reviewed, so don't use
+> Koode for highly sensitive conversations yet. See [PROGRESS.md](PROGRESS.md).
+>
+> **Licence note:** libsignal is AGPL-3.0, so Koode's source must be offered to
+> its users.
 
 ## Quick start
 

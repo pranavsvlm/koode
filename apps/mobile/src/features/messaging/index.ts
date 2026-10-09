@@ -1,5 +1,5 @@
 import {
-  AttachmentMeta,
+  StoredAttachment,
   type Call,
   ConversationList,
   ConversationSummary,
@@ -10,7 +10,8 @@ import {
 import * as Crypto from 'expo-crypto';
 import { z } from 'zod';
 import { authClient, SignedOutError } from '@/features/auth';
-import { adoptUploaded, discardFiles, upload } from '@/features/media/files';
+import { deviceCrypto } from '@/features/crypto';
+import { adoptUploaded, discardFiles, sealFile, upload } from '@/features/media/files';
 import { env } from '@/lib/env';
 import { usePreferences } from '@/stores/preferences';
 import { MessagingEngine, type MessagingApi, type SocketLike } from './engine';
@@ -50,13 +51,8 @@ const api: MessagingApi = {
   createConversation: (body) =>
     authClient.request('/v1/conversations', ConversationSummary, { method: 'POST', body }),
   createAttachment: (id, body) =>
-    authClient.request(`${conv(id)}/attachments`, AttachmentMeta, { method: 'POST', body }),
+    authClient.request(`${conv(id)}/attachments`, StoredAttachment, { method: 'POST', body }),
   upload,
-  react: (id, messageId, emoji) =>
-    authClient.request(`${conv(id)}/messages/${encodeURIComponent(messageId)}/reaction`, Message, {
-      method: 'PUT',
-      body: { emoji },
-    }),
   deleteMessage: (id, messageId) =>
     authClient.request(`${conv(id)}/messages/${encodeURIComponent(messageId)}`, Message, {
       method: 'DELETE',
@@ -118,6 +114,8 @@ export function createMessagingEngine(
   return new MessagingEngine({
     me,
     api,
+    crypto: deviceCrypto(me),
+    sealFile,
     connect,
     store,
     uuid: () => Crypto.randomUUID(),

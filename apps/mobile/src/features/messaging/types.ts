@@ -2,10 +2,20 @@ import type {
   AttachmentMeta,
   ConversationSummary,
   CreateAttachmentRequest,
+  FileSecret,
   PublicUser,
   Reaction,
   SystemEvent,
 } from '@koode/shared';
+
+/** A file encrypted for upload: the ciphertext's location, key and digest. */
+export type SealedFile = FileSecret & { uri: string; size: number };
+
+/** An attachment as the app shows it, with what's needed to decrypt the download. */
+export type LocalAttachment = AttachmentMeta & {
+  /** Keys for the encrypted file and poster (absent for pre-encryption attachments). */
+  secret?: { content: FileSecret; thumbnail: FileSecret | null };
+};
 
 /**
  * A file waiting to be sent. Files live in the app's outbox directory so a
@@ -15,7 +25,11 @@ export type LocalUpload = {
   uri: string;
   /** Video poster (JPEG), uploaded next to it. */
   posterUri: string | null;
+  /** What the file is (validated on the device; sent inside the encrypted message). */
   request: CreateAttachmentRequest;
+  /** The encrypted copies actually uploaded (made once, so retries resume). */
+  sealed?: SealedFile | null;
+  posterSealed?: SealedFile | null;
   attachmentId: string | null;
   posterUploaded: boolean;
   uploaded: boolean;
@@ -32,12 +46,25 @@ export type LocalMessage = {
   /** Server revision (last change); null until accepted. */
   rev: number | null;
   senderId: string;
-  kind: 'text' | 'attachment' | 'system';
+  /** 'reaction' messages aren't shown: they set `reactions` on their target. */
+  kind: 'text' | 'attachment' | 'system' | 'reaction';
+  /** Text, caption, or (reaction) the emoji ('' = removed). */
   body: string;
   replyToId: string | null;
-  attachment: AttachmentMeta | null;
+  attachment: LocalAttachment | null;
   system: SystemEvent | null;
+  /** kind = reaction: the message reacted to. */
+  targetId: string | null;
+  /** Derived from reaction messages (latest per person). */
   reactions: Reaction[];
+  /**
+   * Content came from this device (sent here) or was decrypted here. The
+   * Double Ratchet can decrypt a message only once, so such content is never
+   * replaced by a fresh decryption attempt.
+   */
+  opened?: boolean;
+  /** Couldn't be decrypted (why, for the UI). */
+  undecryptable?: 'failed' | 'identity' | 'missing' | null;
   deletedAt: number | null;
   createdAt: number;
   state: 'pending' | 'sent' | 'failed';
@@ -62,6 +89,7 @@ export function normalizeMessage(
     kind: m.kind ?? 'text',
     attachment: m.attachment ?? null,
     system: m.system ?? null,
+    targetId: m.targetId ?? null,
     reactions: m.reactions ?? [],
     deletedAt: m.deletedAt ?? null,
   };
@@ -92,6 +120,8 @@ export interface MessagingStore {
   saveConversations(conversations: ConversationSummary[]): Promise<void>;
   saveUsers(users: PublicUser[]): Promise<void>;
   saveMessages(messages: LocalMessage[]): Promise<void>;
+  /** Cached copies by id (including ones not loaded at start-up). */
+  getMessages(ids: string[]): Promise<LocalMessage[]>;
   deleteMessages(ids: string[]): Promise<void>;
   /** The conversation and its messages (left or removed from a group). */
   removeConversation(id: string): Promise<void>;
@@ -111,6 +141,7 @@ export function memoryStore(): MessagingStore & { dump: () => { messages: LocalM
     saveConversations: async (list) => list.forEach((c) => conversations.set(c.id, c)),
     saveUsers: async (list) => list.forEach((u) => users.set(u.id, u)),
     saveMessages: async (list) => list.forEach((m) => messages.set(m.id, m)),
+    getMessages: async (ids) => ids.flatMap((id) => (messages.has(id) ? [messages.get(id)!] : [])),
     deleteMessages: async (ids) => ids.forEach((id) => messages.delete(id)),
     removeConversation: async (id) => {
       conversations.delete(id);

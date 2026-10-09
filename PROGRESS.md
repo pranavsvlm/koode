@@ -1,19 +1,211 @@
 # Progress
 
-| Phase | Scope                    | Status                                                 |
-| ----- | ------------------------ | ------------------------------------------------------ |
-| 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2) |
-| 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator          |
-| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator          |
-| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator    |
-| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator    |
-| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator          |
-| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator         |
-| 8     | Security and E2EE        | ⏳ Awaiting approval                                   |
-| 9     | Performance and testing  | —                                                      |
-| 10    | Builds and distribution  | —                                                      |
+| Phase | Scope                    | Status                                                                     |
+| ----- | ------------------------ | -------------------------------------------------------------------------- |
+| 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2)                     |
+| 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator                              |
+| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator                              |
+| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator                        |
+| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator                        |
+| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator                              |
+| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator                             |
+| 8     | Security and E2EE        | ✅ Complete on iOS; interop E2E on the Simulator; Android E2EE not written |
+| 9     | Performance and testing  | ⏳ Awaiting approval                                                       |
+| 10    | Builds and distribution  | —                                                                          |
 
-**E2EE status: not implemented.** Traffic is protected by TLS only.
+**E2EE status:** messages, attachments, reactions and calls are end-to-end encrypted
+with libsignal on **iOS**, verified against Signal's Node implementation. Not
+independently reviewed. **Android has no E2EE module yet**, so it can't send.
+
+---
+
+## Phase 8: Security and end-to-end encryption (2026-10-09)
+
+Koode now uses the Signal Protocol through **libsignal v0.103.0** (Signal's own
+library, AGPL-3.0; the project owner chose it, knowing Koode's source must be
+offered to its users):
+
+- **Key agreement and sessions:** PQXDH (X25519 + ML-KEM) and the Double Ratchet.
+- **What's encrypted:**
+  - **Messages** (text, replies, attachment metadata), as a separate ciphertext for
+    every device of every member;
+  - **Reactions**, sent as their own encrypted messages;
+  - **Files and video posters**, with AES-256-GCM and a fresh key each;
+  - **Calls**, with LiveKit frame encryption whose key travels only in Signal
+    envelopes.
+- **What the server keeps:** a public-key directory and ciphertext.
+
+**Scope:** iOS. The Android native module isn't written (there's no Android SDK or
+JDK on this machine to build or test it). On Android the app reports that
+encryption is unavailable and sends nothing.
+
+### Delivered
+
+- **Shared** (`packages/shared/src/keys.ts`):
+  - the key directory, envelope and device-mismatch schemas;
+  - the versioned `Payload`: message payloads name their message id and
+    conversation, a reaction names its target, and a call key names its call;
+  - encrypted send, upload and call schemas.
+- **Server:**
+  - **Migration `0007`:**
+    - `signal_device_id` per account (backfilled; never reused);
+    - key tables;
+    - `message_envelopes` and `call_envelopes`;
+    - `messages` rebuilt (adds `reaction`, `signal`, `sender_device`, `target_id`);
+    - attachments of kind `encrypted`;
+    - the plaintext `reactions` table removed.
+  - **`/v1/keys`:**
+    - publish: the identity is fixed per device; a refused change is audited;
+    - top up: ≤ 200 of each key;
+    - status;
+    - device list;
+    - bundles: one-time keys handed out once, then last-resort; rate-limited per
+      user.
+  - **Sends:** ciphertext only. The server requires exactly one envelope per
+    current device of every member, except the sender's device; otherwise it
+    answers 409 with `{missing, extra}`. Errors now carry `details`.
+  - **Delivery:**
+    - each member's realtime event carries only their devices' envelopes;
+    - history carries only the reading device's;
+    - summaries carry none.
+  - **Reactions:** never unread, never the last message, never pushed.
+  - **Deletion** erases envelopes, the file and reactions to the message.
+  - **Uploads:** accept only `{sizeBytes}` (strict) and are served as opaque
+    downloads; encrypted posters are supported.
+  - **Calls:** caller-chosen ids; the media key in envelopes for exactly the
+    callee's devices; the answering device gets its own from `accept`. Calls to
+    people without keys are refused.
+  - **Pushes:** "New message" only.
+  - **Hardening:**
+    - JSON size limits are enforced on bytes actually read (a chunked body could
+      skip them before), with per-route limits for key and envelope payloads;
+    - per-user rate limits on sends, uploads, calls and key bundles;
+    - audit events for key publication, refused identity changes, group changes
+      and moderator deletions (never content).
+- **App:**
+  - **Native `koode-signal` (Swift):**
+    - protocol stores in the Keychain (after first unlock, this device only);
+    - TOFU, so a changed identity is refused;
+    - one-time Kyber keys deleted after use; last-resort base-key replay
+      rejected;
+    - safety numbers;
+    - file encryption with digest checks;
+    - `forgetIdentity` to accept a changed key.
+  - **Build plugin `withLibSignal`:** the pod from the release tag with its
+    checksum-verified prebuilt FFI, and the linker search path (`post_integrate`).
+  - **`features/crypto`:**
+    - key bootstrap: a fresh identity per server device; "keys lost" detection;
+    - prekey top-ups, with key ids never reused;
+    - monthly signed-prekey rotation;
+    - sessions only where needed;
+    - device cache refreshed after a 409;
+    - verification state;
+    - reset at sign-out.
+  - **Engine:**
+    - **Receiving:** an ordered, decrypt-once inbox (memory, then cache, then
+      ratchet). It never overwrites opened content and checks binding.
+      Unreadable messages show "couldn't be decrypted" or "not available on this
+      device".
+    - **Sending:** an encrypted outbox with 409 refresh-and-retry; a changed
+      safety number fails the send.
+    - **Reactions:** encrypted reaction messages, aggregated per person (latest
+      wins) and applied to older messages as they load.
+    - **Uploads:** files and posters are encrypted before upload; the server
+      learns only the ciphertext size.
+  - **Media cache:** downloads are digest-checked and decrypted; a partial or
+    altered file is never cached.
+  - **Calls:** the key is generated, encrypted, decrypted and bound to its call.
+    LiveKit E2EE (`RNE2EEManager`) is on before connecting, with no unencrypted
+    fallback. The call screen shows "End-to-end encrypted".
+  - **New screens and texts:**
+    - a **Safety Number** screen (60 digits per device, Mark as Verified,
+      "safety number changed");
+    - the contact screen's security row;
+    - Privacy: "End-to-end encrypted, pending review";
+    - Notifications: the sender only.
+  - **Directory:** new members are now looked up, so names appear.
+- **Dev tooling:**
+  - the `e2ee` tour;
+  - `scripts/e2ee-peer.mjs`, playing "Maya" with `@signalapp/libsignal-client` and
+    `@livekit/rtc-node` (dev dependencies).
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Result         |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `pnpm check` (types, lint, Prettier, all tests)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | ✅ Pass        |
+| Shared schema tests (payload binding, envelope validation, kind rules)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | ✅ 33/33       |
+| Push relay tests                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | ✅ 6/6         |
+| Server tests: 12 new in `e2ee.test.ts`, plus every earlier test migrated to ciphertext sends. They cover:<br>• device numbering (never reused);<br>• identity immutability (audited);<br>• one-time keys handed out once, then last-resort;<br>• caps; real-size key uploads; oversized bodies refused;<br>• the device list skipping revoked and keyless devices;<br>• exact coverage (missing, extra, duplicate, unknown);<br>• removed members dropped at once;<br>• per-device envelopes in history and realtime;<br>• call-key routing; no keys → refused; call ids not reusable;<br>• message flood → 429;<br>• no text or ciphertext in pushes;<br>• encrypted reactions and deletion | ✅ 102/102     |
+| Mobile tests: 15 new. They cover:<br>• decrypt-once (socket and catch-up, cache after restart);<br>• the 409 retry;<br>• safety-number failure;<br>• binding checks;<br>• undecryptable and missing messages;<br>• legacy plaintext;<br>• encrypted uploads;<br>• reactions;<br>• device crypto (bootstrap, keys lost, top-up and rotation, sessions, identity change, verification, reset);<br>• the call key passed to media;<br>• the UI mapping                                                                                                                                                                                                                                          | ✅ 191/191     |
+| Native iOS build with libsignal (pod with checksum-verified FFI)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | ✅             |
+| Migration `0007` on the existing local data (62 devices numbered, no duplicates, 107 legacy messages intact)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | ✅             |
+| `expo export` iOS and Android bundles                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | ✅             |
+| **Interop E2E on the Simulator: app (Swift libsignal) ↔ Signal's Node libsignal ↔ local Worker and LiveKit**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | ✅ **17/17**   |
+| Node → app: text and photo decrypted (digest checked, exact size, dimensions); nothing undecryptable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | ✅             |
+| App → Node: text, photo (digest, size, JPEG) and reaction decrypted with real PQXDH sessions                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | ✅             |
+| Server stored only ciphertext; the photo's type, size and dimensions never reached it                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | ✅             |
+| Safety numbers identical on both sides (computed independently)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | ✅             |
+| Reactions both ways, encrypted and bound to their targets                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | ✅             |
+| Call key decrypted by the callee's device and bound to the call                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              | ✅             |
+| **Call media:**<br>• the app decrypted and decoded the peer's encrypted audio (energy > 0 in its WebRTC stats);<br>• a Node listener with the key heard it;<br>• one with a wrong key heard nothing;<br>• LiveKit reports every published track GCM-encrypted                                                                                                                                                                                                                                                                                                                                                                                                                                | ✅             |
+| Screens: chat (decrypted text, photo, reactions), Safety Number, encrypted call chip, Privacy, Notifications, contact security row                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | ✅ Screenshots |
+
+Bugs found by these tests and fixed:
+
+- **Key publish too large:** the first key publish exceeded the global 16 KB body
+  limit (100 Kyber-1024 keys are about 220 KB). Groups' first messages would have
+  too.
+- **Unknown names:** a new contact's chat had no name, because the user directory
+  wasn't refreshed for unknown members.
+- **Encryption indicator:** the call screen's flag relied on an event the RN SDK
+  never sends for remote participants. It now comes from track encryption
+  metadata.
+
+### Not verified
+
+- **App → peer call audio:** the Simulator's microphone produced silence, so the
+  direction "app encrypts, peer decrypts" was only confirmed through metadata (the
+  SFU reports the app's track as GCM). The opposite direction was confirmed by
+  decoded audio.
+- **Video frame encryption:** the Simulator has no camera.
+- **Android:** no E2EE module (see above), and nothing Android ran.
+- **Real conditions:** two physical iPhones; a sender with several devices of
+  their own; key top-ups after many sessions; signed-prekey rotation after 30
+  days. The last two are unit-tested only.
+- **Independent review:** no security review or audit of the integration.
+
+### Known issues and limitations
+
+- **No Android E2EE.** Writing the Kotlin module needs a JDK and the Android SDK
+  (both free) to build and test.
+- **History on new devices:** a new device (recovery, reinstall) can't read
+  messages sent before it existed; they show "Not available on this device". This
+  is the same as Signal.
+- **Decrypt once:** if the app is killed between decrypting a message and saving
+  it, that message is lost on this device.
+- **Notifications** say only "New message". Text would need a Notification Service
+  Extension.
+- **Memory:** files are encrypted and decrypted in memory, so videos near 100 MB
+  use that much RAM.
+- **Still visible to the server:** metadata (who, when, sizes, membership, which
+  message a reaction targets); see ARCHITECTURE.md. Ciphertext is kept until a
+  message is deleted for everyone.
+- **Legacy plaintext:** messages from before Phase 8 remain plaintext on the
+  development server.
+- **Trust model:** TOFU per device. A verified contact's new device shows "safety
+  number changed", but sending isn't blocked.
+- **Session expiry** is unchanged from Phase 3: 15-minute access tokens, refresh
+  tokens expiring after 30 days idle or 180 days absolute, revocation on every
+  request, and sockets closed at sign-out.
+- **AGPL:** how and where Koode's source is offered is your decision, for Phase 10.
+
+### Manual configuration required
+
+- **Migration:** `pnpm --filter @koode/server db:migrate:local` (and remotely,
+  with approval, before any deploy).
+- **Rebuild the iOS app:** the new native module and pod need it
+  (`npx expo run:ios` or `expo prebuild` plus Xcode).
 
 ---
 

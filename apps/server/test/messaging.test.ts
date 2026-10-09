@@ -1,15 +1,25 @@
 import { env } from 'cloudflare:test';
-import { ConversationSummary, Message, MessagePage, UserDirectory } from '@koode/shared';
+import {
+  ConversationSummary,
+  Message,
+  MessagePage,
+  UserDirectory,
+  type AuthSession,
+} from '@koode/shared';
 import { describe, expect, it } from 'vitest';
-import { api, openSocket, registerUser, seedInvite, twoUsers, uuid } from './helpers';
+import {
+  api,
+  opened,
+  openSocket,
+  registerUser,
+  seedInvite,
+  sendMessage,
+  twoUsers,
+  uuid,
+} from './helpers';
 
-const send = (
-  token: string,
-  conversationId: string,
-  body: string,
-  id = uuid(),
-  replyToId?: string,
-) => api(`/conversations/${conversationId}/messages`, { body: { id, body, replyToId }, token });
+const send = (s: AuthSession, conversationId: string, text: string, id = uuid()) =>
+  sendMessage(s, conversationId, text, { id });
 
 async function directChat() {
   const users = await twoUsers();
@@ -78,9 +88,16 @@ describe('directory and conversations', () => {
 describe('messages', () => {
   it('assigns increasing sequence numbers and stores server timestamps', async () => {
     const { conversation: c, maya, dan } = await directChat();
-    const a = Message.parse((await send(maya.accessToken, c.id, ' hello ')).json);
-    const b = Message.parse((await send(dan.accessToken, c.id, 'hi!')).json);
-    expect(a).toMatchObject({ seq: 1, body: 'hello', senderId: maya.user.id });
+    const a = Message.parse((await send(maya, c.id, ' hello ')).json);
+    const b = Message.parse((await send(dan, c.id, 'hi!')).json);
+    expect(a).toMatchObject({
+      seq: 1,
+      encryption: 'signal',
+      body: '',
+      senderId: maya.user.id,
+      senderDevice: 1,
+      envelopes: [], // the sending device has the plaintext
+    });
     expect(b.seq).toBe(2);
     expect(b.createdAt).toBeGreaterThanOrEqual(a.createdAt);
   });
@@ -88,10 +105,10 @@ describe('messages', () => {
   it('is idempotent on retry and refuses reusing an id elsewhere', async () => {
     const { conversation: c, maya, dan } = await directChat();
     const id = uuid();
-    const first = await send(maya.accessToken, c.id, 'once', id);
-    const retry = await send(maya.accessToken, c.id, 'once', id);
+    const first = await send(maya, c.id, 'once', id);
+    const retry = await send(maya, c.id, 'once', id);
     expect(retry.json).toEqual(first.json);
-    expect((await send(dan.accessToken, c.id, 'hijack', id)).status).toBe(409);
+    expect((await send(dan, c.id, 'hijack', id)).status).toBe(409);
     const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages').first<{ n: number }>();
     expect(count?.n).toBe(1);
   });
@@ -100,7 +117,7 @@ describe('messages', () => {
     const { conversation: c } = await directChat();
     await seedInvite('THRDPERS0N00');
     const eve = await registerUser({ inviteCode: 'THRDPERS0N00', username: 'eve' });
-    expect((await send(eve.session.accessToken, c.id, 'hi')).status).toBe(404);
+    expect((await send(eve.session, c.id, 'hi')).status).toBe(404);
     expect(
       (await api(`/conversations/${c.id}/messages`, { token: eve.session.accessToken })).status,
     ).toBe(404);
@@ -117,24 +134,22 @@ describe('messages', () => {
     ).toBe(404);
   });
 
-  it('validates replies and bodies', async () => {
+  it('accepts ciphertext only, of known kinds', async () => {
     const { conversation: c, maya } = await directChat();
-    const parent = Message.parse((await send(maya.accessToken, c.id, 'parent')).json);
-    expect((await send(maya.accessToken, c.id, 'reply', uuid(), parent.id)).json.replyToId).toBe(
-      parent.id,
-    );
-    expect((await send(maya.accessToken, c.id, 'bad reply', uuid(), uuid())).status).toBe(400);
-    expect((await send(maya.accessToken, c.id, '   ')).status).toBe(400);
-    expect((await send(maya.accessToken, c.id, 'x'.repeat(4001))).status).toBe(400);
+    const post = (body: object) =>
+      api(`/conversations/${c.id}/messages`, { body, token: maya.accessToken });
+    expect((await post({ id: uuid(), body: 'plaintext' })).status).toBe(400);
+    expect((await post({ id: uuid(), kind: 'system', envelopes: [] })).status).toBe(400);
+    expect((await post({ id: uuid(), kind: 'text', envelopes: [{}] })).status).toBe(400);
   });
 
   it('paginates backward from the newest and forward after a cursor', async () => {
-    const { conversation: c, maya } = await directChat();
-    for (let i = 1; i <= 7; i++) await send(maya.accessToken, c.id, `m${i}`);
+    const { conversation: c, maya, dan } = await directChat();
+    for (let i = 1; i <= 7; i++) await send(maya, c.id, `m${i}`);
     const latest = MessagePage.parse(
-      (await api(`/conversations/${c.id}/messages?limit=3`, { token: maya.accessToken })).json,
+      (await api(`/conversations/${c.id}/messages?limit=3`, { token: dan.accessToken })).json,
     );
-    expect(latest.messages.map((m) => m.body)).toEqual(['m5', 'm6', 'm7']);
+    expect(latest.messages.map(opened)).toEqual(['m5', 'm6', 'm7']);
     expect(latest.hasMore).toBe(true);
     const older = MessagePage.parse(
       (await api(`/conversations/${c.id}/messages?before=5&limit=3`, { token: maya.accessToken }))
@@ -163,8 +178,8 @@ describe('receipts and unread counts', () => {
 
   it('tracks unread counts and delivered/read positions', async () => {
     const { conversation: c, maya, dan } = await directChat();
-    await send(maya.accessToken, c.id, 'one');
-    await send(maya.accessToken, c.id, 'two');
+    await send(maya, c.id, 'one');
+    await send(maya, c.id, 'two');
     expect((await summaryFor(dan.accessToken, c.id)).unreadCount).toBe(2);
     expect((await summaryFor(maya.accessToken, c.id)).unreadCount).toBe(0); // own messages
 
@@ -187,7 +202,7 @@ describe('receipts and unread counts', () => {
 
   it('never moves backwards or beyond the last message', async () => {
     const { conversation: c, maya, dan } = await directChat();
-    await send(maya.accessToken, c.id, 'one');
+    await send(maya, c.id, 'one');
     await api(`/conversations/${c.id}/receipts`, { body: { read: 99 }, token: dan.accessToken });
     await api(`/conversations/${c.id}/receipts`, { body: { read: 0 }, token: dan.accessToken });
     const me = (await summaryFor(dan.accessToken, c.id)).members.find(
@@ -198,7 +213,7 @@ describe('receipts and unread counts', () => {
 
   it('keeps read positions private when read receipts are off', async () => {
     const { conversation: c, maya, dan } = await directChat();
-    await send(maya.accessToken, c.id, 'one');
+    await send(maya, c.id, 'one');
     await api(`/conversations/${c.id}/receipts`, {
       body: { read: 1, shareRead: false },
       token: dan.accessToken,
@@ -212,11 +227,12 @@ describe('receipts and unread counts', () => {
 
   it('lists conversations newest-activity first with the last message', async () => {
     const { conversation: c, maya, dan } = await directChat();
-    await send(maya.accessToken, c.id, 'latest');
+    await send(maya, c.id, 'latest');
     const list = (await api('/conversations', { token: dan.accessToken })).json.conversations;
     expect(list).toHaveLength(1);
     expect(list[0]).toMatchObject({ id: c.id, lastSeq: 1, unreadCount: 1 });
-    expect(list[0].lastMessage.body).toBe('latest');
+    // Summaries carry no ciphertext: devices preview from their own decrypted copy.
+    expect(list[0].lastMessage).toMatchObject({ kind: 'text', envelopes: [] });
   });
 });
 
@@ -233,9 +249,9 @@ describe('realtime', () => {
     expect(await danSocket.next('ready')).toBeTruthy();
     expect(await mayaSocket.next('ready')).toBeTruthy();
 
-    await send(maya.accessToken, c.id, 'live!');
+    await send(maya, c.id, 'live!');
     const toDan = await danSocket.next('message');
-    expect((toDan?.message as { body: string }).body).toBe('live!');
+    expect(opened(toDan?.message as Message)).toBe('live!');
     // The sender's own devices get it too (multi-device sync).
     expect(await mayaSocket.next('message')).toBeTruthy();
 

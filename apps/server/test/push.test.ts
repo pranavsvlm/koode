@@ -3,7 +3,7 @@ import { env, runDurableObjectAlarm } from 'cloudflare:test';
 import { CallJoin, type AuthSession } from '@koode/shared';
 import { importSPKI, jwtVerify } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, openSocket, twoUsers, uuid } from './helpers';
+import { api, openSocket, sendMessage, startCall, twoUsers } from './helpers';
 
 const APP_ID = 'com.navoasis.koode.dev';
 const hex = (c: string) => c.repeat(64);
@@ -89,11 +89,8 @@ async function directChat(from: AuthSession, to: AuthSession) {
     })
   ).json.id as string;
 }
-const send = (s: AuthSession, conversationId: string, body: string) =>
-  api(`/conversations/${conversationId}/messages`, {
-    body: { id: uuid(), body },
-    token: s.accessToken,
-  });
+const send = (s: AuthSession, conversationId: string, text: string) =>
+  sendMessage(s, conversationId, text);
 
 const registration = (deviceId: string) =>
   env.DB.prepare('SELECT * FROM push_registrations WHERE device_id = ?')
@@ -162,12 +159,12 @@ describe('registration', () => {
 });
 
 describe('message notifications', () => {
-  it('alerts the recipient through the relay, never the sender', async () => {
+  it('alerts the recipient through the relay, never the sender, without content', async () => {
     const { maya, dan } = await twoUsers();
     await registerIos(maya, { alertToken: hex('1'), voipToken: null });
     await registerIos(dan);
     const id = await directChat(maya, dan);
-    await send(maya, id, 'Dinner at 7?');
+    const sent = await send(maya, id, 'Dinner at 7?');
 
     await vi.waitFor(() => expect(apns).toHaveLength(1));
     const [push] = apns;
@@ -180,7 +177,8 @@ describe('message notifications', () => {
       priority: 10,
       payload: {
         aps: {
-          alert: { title: 'Maya Chen', body: 'Dinner at 7?' },
+          // End-to-end encrypted: the server only knows a message arrived.
+          alert: { title: 'Maya Chen', body: 'New message' },
           'thread-id': id,
           badge: 1,
           category: 'message',
@@ -188,9 +186,23 @@ describe('message notifications', () => {
         body: { type: 'message', conversationId: id },
       },
     });
+    const pushed = JSON.stringify(push!.body);
+    expect(pushed).not.toContain('Dinner');
+    const ciphertext = (
+      await env.DB.prepare('SELECT body FROM message_envelopes WHERE message_id = ?')
+        .bind(sent.json.id)
+        .first<{ body: string }>()
+    )?.body;
+    expect(ciphertext).toBeTruthy();
+    expect(pushed).not.toContain(ciphertext);
+
+    // Reactions are silent.
+    await sendMessage(dan, id, '👍', { targetId: sent.json.id });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(apns).toHaveLength(1);
   });
 
-  it('hides the text when previews are off, and respects muted message types', async () => {
+  it('respects muted message types', async () => {
     const { maya, dan } = await twoUsers();
     await registerIos(dan, { settings: { ...SETTINGS, previews: false } });
     const id = await directChat(maya, dan);
@@ -216,7 +228,7 @@ describe('message notifications', () => {
     await vi.waitFor(() => expect(apns).toHaveLength(1));
     expect(apns[0]!.body.payload.aps.alert).toEqual({
       title: 'Family',
-      body: 'Maya Chen: Hello all',
+      body: 'Maya Chen: New message',
     });
 
     await registerIos(dan, { settings: { ...SETTINGS, groupMessages: false } });
@@ -238,7 +250,7 @@ describe('message notifications', () => {
       android: { priority: 'high', ttl: '86400s' },
       data: {
         title: 'Maya Chen',
-        message: 'Hi Dan',
+        message: 'New message',
         channelId: 'messages',
         tag: id,
         badge: '1',
@@ -288,8 +300,7 @@ describe('message notifications', () => {
 });
 
 describe('call notifications', () => {
-  const start = (s: AuthSession, userId: string, kind: 'voice' | 'video' = 'voice') =>
-    api('/calls', { body: { userId, kind }, token: s.accessToken });
+  const start = startCall;
 
   it('rings iOS through PushKit and Android through a high-priority data message', async () => {
     const { maya, dan } = await twoUsers();

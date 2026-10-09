@@ -13,7 +13,11 @@ export type AuditEvent =
   | 'recovery_key_rotated'
   | 'profile_updated'
   | 'invite_created'
-  | 'invite_revoked';
+  | 'invite_revoked'
+  | 'keys_published'
+  | 'identity_key_rejected'
+  | 'message_deleted'
+  | 'group_changed';
 
 export function auditStatement(
   db: D1Database,

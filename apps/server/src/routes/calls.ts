@@ -1,17 +1,19 @@
 import {
+  callIdFor,
   RING_TIMEOUT_MS,
   StartCallRequest,
   type Call,
   type CallJoin,
   type CallState,
 } from '@koode/shared';
+import { coverage, keyedDevices, signalDeviceId } from '../keys/devices';
+import { limitUser, RULES } from '../lib/rate-limit';
 import { Hono } from 'hono';
 import type { AppEnv } from '../app';
 import { requireAuth } from '../auth/middleware';
-import { newId } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
 import { mediaToken } from '../lib/livekit';
-import { parseJson } from '../lib/validate';
+import { BODY_LIMITS, parseJson } from '../lib/validate';
 import { publishCall } from '../calls/events';
 import { COLUMNS, displayName, toCall, transition, type CallRow } from '../calls/rows';
 
@@ -45,6 +47,28 @@ async function loadCall(db: D1Database, id: string, userId: string): Promise<Cal
   return row;
 }
 
+/** The media key envelope for this device, if it's the callee's. */
+async function callKey(
+  db: D1Database,
+  callId: string,
+  userId: string,
+  deviceId: string,
+): Promise<CallJoin['key']> {
+  const row = await db
+    .prepare(
+      `SELECT c.caller_device, e.device, e.type, e.body FROM call_envelopes e JOIN calls c ON c.id = e.call_id
+       WHERE e.call_id = ? AND e.user_id = ? AND e.device = ?`,
+    )
+    .bind(callId, userId, await signalDeviceId(db, deviceId))
+    .first<{ caller_device: number; device: number; type: 2 | 3; body: string }>();
+  return row
+    ? {
+        senderDevice: row.caller_device,
+        envelope: { deviceId: row.device, type: row.type, body: row.body },
+      }
+    : null;
+}
+
 export const calls = new Hono<AppEnv>()
   .use(requireAuth)
 
@@ -60,9 +84,11 @@ export const calls = new Hono<AppEnv>()
   })
 
   .post('/', async (c) => {
-    const { userId, kind } = await parseJson(c, StartCallRequest);
+    const req = await parseJson(c, StartCallRequest, BODY_LIMITS.call);
+    const { userId, kind } = req;
     const me = c.get('auth').userId;
     const db = c.env.DB;
+    await limitUser(c.env, RULES.startCall, me);
     if (userId === me) throw new ApiError('bad_request', 'You can’t call yourself');
     const callee = await db
       .prepare("SELECT id FROM users WHERE id = ? AND status = 'active'")
@@ -81,8 +107,15 @@ export const calls = new Hono<AppEnv>()
       .first();
     if (busy) throw new ApiError('conflict', 'Busy: one of you is already in a call');
 
+    // The media key, encrypted to exactly the callee's current devices.
+    const devices = await keyedDevices(db, [userId]);
+    if (devices.length === 0)
+      throw new ApiError('bad_request', 'They need to update Koode before you can call them');
+    const mismatch = coverage(devices, req.envelopes);
+    if (mismatch) throw new ApiError('conflict', 'Their devices have changed', mismatch);
+
     const row: CallRow = {
-      id: newId('cal'),
+      id: callIdFor(req.id),
       kind,
       caller_id: me,
       callee_id: userId,
@@ -91,10 +124,25 @@ export const calls = new Hono<AppEnv>()
       answered_at: null,
       ended_at: null,
     };
-    await db
-      .prepare(`INSERT INTO calls (${COLUMNS}) VALUES (?, ?, ?, ?, 'ringing', ?, NULL, NULL)`)
-      .bind(row.id, kind, me, userId, now)
-      .run();
+    const callerDevice = await signalDeviceId(db, c.get('auth').deviceId);
+    try {
+      await db.batch([
+        db
+          .prepare(
+            `INSERT INTO calls (${COLUMNS}, caller_device) VALUES (?, ?, ?, ?, 'ringing', ?, NULL, NULL, ?)`,
+          )
+          .bind(row.id, kind, me, userId, now, callerDevice),
+        ...req.envelopes.map((e) =>
+          db
+            .prepare(
+              'INSERT INTO call_envelopes (call_id, user_id, device, type, body) VALUES (?, ?, ?, ?, ?)',
+            )
+            .bind(row.id, e.userId, e.deviceId, e.type, e.body),
+        ),
+      ]);
+    } catch {
+      throw new ApiError('conflict', 'Call id already used');
+    }
     const call = toCall(row);
     const timer = c.env.CALL_TIMER.get(c.env.CALL_TIMER.idFromName(row.id));
     await timer.arm(row.id, now + RING_TIMEOUT_MS);
@@ -105,7 +153,7 @@ export const calls = new Hono<AppEnv>()
       identity: me,
       name: await displayName(db, me),
     });
-    return c.json<CallJoin>({ call, media }, 201);
+    return c.json<CallJoin>({ call, media, key: null }, 201);
   })
 
   .get('/:id', async (c) =>
@@ -130,7 +178,11 @@ export const calls = new Hono<AppEnv>()
       identity: me,
       name: await displayName(db, me),
     });
-    return c.json<CallJoin>({ call, media });
+    return c.json<CallJoin>({
+      call,
+      media,
+      key: await callKey(db, row.id, me, c.get('auth').deviceId),
+    });
   })
 
   /** Fresh join credentials for an active call (e.g. the app restarted mid-call). */
@@ -143,7 +195,11 @@ export const calls = new Hono<AppEnv>()
       identity: me,
       name: await displayName(c.env.DB, me),
     });
-    return c.json<CallJoin>({ call: toCall(row), media });
+    return c.json<CallJoin>({
+      call: toCall(row),
+      media,
+      key: await callKey(c.env.DB, row.id, me, c.get('auth').deviceId),
+    });
   })
 
   .post('/:id/decline', async (c) => {

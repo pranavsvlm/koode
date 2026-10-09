@@ -43,6 +43,12 @@ const TEXT_SIZE: Record<ChatTextSize, { fontSize: number; lineHeight: number }> 
   large: { fontSize: 20, lineHeight: 26 },
 };
 
+const UNDECRYPTABLE: Record<NonNullable<Message['undecryptable']>, string> = {
+  failed: 'This message couldn’t be decrypted',
+  identity: 'Couldn’t decrypt: their safety number changed',
+  missing: 'Not available on this device',
+};
+
 export type MessageBubbleProps = {
   message: Message;
   position: GroupPosition;
@@ -120,17 +126,15 @@ export const MessageBubble = memo(function MessageBubble({
     .filter(Boolean)
     .join(', ');
 
-  const bubbleBg = message.deleted
-    ? 'bg-fill'
-    : outgoing
-      ? 'bg-bubble-outgoing'
-      : 'bg-bubble-incoming';
-  const textTone = message.deleted ? 'tertiary' : outgoing ? 'inverse' : 'primary';
+  // Deleted, or unreadable here: a quiet note instead of content.
+  const muted = message.deleted || !!message.undecryptable;
+  const bubbleBg = muted ? 'bg-fill' : outgoing ? 'bg-bubble-outgoing' : 'bg-bubble-incoming';
+  const textTone = muted ? 'tertiary' : outgoing ? 'inverse' : 'primary';
 
   const bubble = (
     <Pressable
       onLongPress={() => {
-        if (message.deleted) return;
+        if (muted) return;
         haptics.press();
         onLongPress(message);
       }}
@@ -265,6 +269,18 @@ export const MessageBubble = memo(function MessageBubble({
               <Icon name="trash" size={13} color="text-tertiary" />
               <Text variant="body" tone="tertiary" className="italic" style={TEXT_SIZE[textSize]}>
                 Message deleted
+              </Text>
+            </View>
+          ) : message.undecryptable ? (
+            <View className="mr-auto shrink flex-row items-center gap-1.5">
+              <Icon name="lock" size={13} color="text-tertiary" />
+              <Text
+                variant="body"
+                tone="tertiary"
+                className="shrink italic"
+                style={TEXT_SIZE[textSize]}
+              >
+                {UNDECRYPTABLE[message.undecryptable]}
               </Text>
             </View>
           ) : message.text ? (

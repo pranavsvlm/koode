@@ -1,6 +1,6 @@
-import { RING_TIMEOUT_MS, type Call, type CallJoin } from '@koode/shared';
+import { RING_TIMEOUT_MS, type Call } from '@koode/shared';
 import { ApiClientError } from '@/lib/api';
-import { CallController, type CallApi } from '../controller';
+import { CallController, type CallApi, type SecureJoin } from '../controller';
 import type { MediaEvents, MediaSession } from '../media';
 
 const ME = 'usr_me';
@@ -41,10 +41,13 @@ class FakeMedia implements MediaSession {
     remote: new Set(),
     quality: new Set(),
     video: new Set(),
+    encryption: new Set(),
   };
-  async connect(url: string) {
+  key = '';
+  async connect(url: string, _token: string, opts: { camera: boolean; key: string }) {
     if (this.failConnect) throw new Error('no route');
     this.url = url;
+    this.key = opts.key;
     this.connected = true;
   }
   async disconnect() {
@@ -90,7 +93,12 @@ const call = (patch: Partial<Call> = {}): Call => ({
   endedAt: null,
   ...patch,
 });
-const join = (c: Call): CallJoin => ({ call: c, media: { url: 'wss://lk', token: 't' } });
+const join = (c: Call): SecureJoin => ({
+  call: c,
+  media: { url: 'wss://lk', token: 't' },
+  key: null,
+  mediaKey: 'bWVkaWEta2V5',
+});
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function setup() {
@@ -129,6 +137,7 @@ describe('CallController — outgoing', () => {
       speakerOn: false,
     });
     expect(t.media().connected).toBe(true);
+    expect(t.media().key).toBe('bWVkaWEta2V5'); // frames are encrypted with the call's key
 
     t.ctrl.onServerCall(call({ state: 'active', answeredAt: 5 }));
     expect(t.snap().phase).toBe('connecting');

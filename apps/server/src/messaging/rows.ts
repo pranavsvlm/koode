@@ -1,9 +1,9 @@
 import type {
-  AttachmentMeta,
   ConversationMember,
   ConversationSummary,
+  Envelope,
   Message,
-  Reaction,
+  StoredAttachment,
   SystemEvent,
 } from '@koode/shared';
 
@@ -14,14 +14,17 @@ export type MessageRow = {
   seq: number;
   rev: number;
   sender_id: string;
+  sender_device: number | null;
+  encryption: Message['encryption'];
   kind: Message['kind'];
   body: string;
   reply_to_id: string | null;
   attachment_id: string | null;
   system: string | null;
+  target_id: string | null;
   deleted_at: number | null;
   created_at: number;
-  a_kind: AttachmentMeta['kind'] | null;
+  a_kind: StoredAttachment['kind'] | null;
   a_mime: string | null;
   a_size: number | null;
   a_name: string | null;
@@ -34,8 +37,8 @@ export type MessageRow = {
 };
 
 /** `SELECT … FROM messages m` with attachment metadata; append WHERE/ORDER. */
-export const MESSAGE_SELECT = `SELECT m.id, m.conversation_id, m.seq, m.rev, m.sender_id, m.kind, m.body,
-  m.reply_to_id, m.attachment_id, m.system, m.deleted_at, m.created_at,
+export const MESSAGE_SELECT = `SELECT m.id, m.conversation_id, m.seq, m.rev, m.sender_id, m.sender_device,
+  m.encryption, m.kind, m.body, m.reply_to_id, m.attachment_id, m.system, m.target_id, m.deleted_at, m.created_at,
   a.kind AS a_kind, a.mime_type AS a_mime, a.size_bytes AS a_size, a.name AS a_name,
   a.width AS a_width, a.height AS a_height, a.duration_ms AS a_duration,
   a.waveform AS a_waveform, a.preview AS a_preview, a.has_thumbnail AS a_thumb
@@ -50,12 +53,14 @@ function parseJson<T>(s: string | null): T | null {
   }
 }
 
-export const toMessage = (r: MessageRow, reactions: Reaction[] = []): Message => ({
+export const toMessage = (r: MessageRow, envelopes: Envelope[] = []): Message => ({
   id: r.id,
   conversationId: r.conversation_id,
+  encryption: r.encryption,
   seq: r.seq,
   rev: r.rev,
   senderId: r.sender_id,
+  senderDevice: r.sender_device,
   kind: r.kind,
   body: r.body,
   replyToId: r.reply_to_id,
@@ -76,41 +81,68 @@ export const toMessage = (r: MessageRow, reactions: Reaction[] = []): Message =>
         }
       : null,
   system: parseJson<SystemEvent>(r.system),
-  reactions,
+  targetId: r.target_id,
+  envelopes,
   deletedAt: r.deleted_at,
   createdAt: r.created_at,
 });
 
-/** Rows → messages, with their reactions (one extra query per 90 messages). */
-export async function hydrate(db: D1Database, rows: MessageRow[]): Promise<Message[]> {
-  const byMessage = new Map<string, Reaction[]>();
-  for (let i = 0; i < rows.length; i += 90) {
-    const ids = rows.slice(i, i + 90).map((r) => r.id);
+/** Whose envelopes to include: one user's devices (realtime), or one device (history). */
+export type Reader = { userId: string; device?: number };
+
+/**
+ * Rows → messages with the reader's envelopes (one extra query per 90
+ * messages); `null`: no envelopes (summaries — devices preview from their
+ * own decrypted copy).
+ */
+export async function hydrate(
+  db: D1Database,
+  rows: MessageRow[],
+  reader: Reader | null,
+): Promise<Message[]> {
+  const byMessage = new Map<string, Envelope[]>();
+  const encrypted = reader
+    ? rows.filter((r) => r.encryption === 'signal' && r.deleted_at === null)
+    : [];
+  const device = reader?.device;
+  for (let i = 0; i < encrypted.length; i += 90) {
+    const ids = encrypted.slice(i, i + 90).map((r) => r.id);
     const { results } = await db
       .prepare(
-        `SELECT message_id, user_id, emoji FROM reactions WHERE message_id IN (${ids.map(() => '?').join(',')}) ORDER BY created_at`,
+        `SELECT message_id, device, type, body FROM message_envelopes
+         WHERE user_id = ? ${device !== undefined ? 'AND device = ?' : ''}
+           AND message_id IN (${ids.map(() => '?').join(',')})`,
       )
-      .bind(...ids)
-      .all<{ message_id: string; user_id: string; emoji: string }>();
-    for (const r of results) {
-      const list = byMessage.get(r.message_id) ?? [];
-      list.push({ userId: r.user_id, emoji: r.emoji });
-      byMessage.set(r.message_id, list);
+      .bind(reader!.userId, ...(device !== undefined ? [device] : []), ...ids)
+      .all<{ message_id: string; device: number; type: 2 | 3; body: string }>();
+    for (const e of results) {
+      const list = byMessage.get(e.message_id) ?? [];
+      list.push({ deviceId: e.device, type: e.type, body: e.body });
+      byMessage.set(e.message_id, list);
     }
   }
   return rows.map((r) => toMessage(r, byMessage.get(r.id) ?? []));
+}
+
+export async function loadRow(
+  db: D1Database,
+  conversationId: string,
+  id: string,
+): Promise<MessageRow | null> {
+  return db
+    .prepare(`${MESSAGE_SELECT} WHERE m.id = ? AND m.conversation_id = ?`)
+    .bind(id, conversationId)
+    .first<MessageRow>();
 }
 
 export async function loadMessage(
   db: D1Database,
   conversationId: string,
   id: string,
+  reader: Reader,
 ): Promise<Message | null> {
-  const row = await db
-    .prepare(`${MESSAGE_SELECT} WHERE m.id = ? AND m.conversation_id = ?`)
-    .bind(id, conversationId)
-    .first<MessageRow>();
-  return row ? (await hydrate(db, [row]))[0]! : null;
+  const row = await loadRow(db, conversationId, id);
+  return row ? (await hydrate(db, [row], reader))[0]! : null;
 }
 
 type ConversationRow = {
@@ -161,15 +193,15 @@ export async function loadSummaries(
     db
       .prepare(
         `${MESSAGE_SELECT}
-         JOIN conversations c ON c.id = m.conversation_id AND m.seq = c.last_seq
-         WHERE c.id IN (${mine})`,
+         WHERE m.conversation_id IN (${mine}) AND m.seq = (
+           SELECT MAX(seq) FROM messages WHERE conversation_id = m.conversation_id AND kind != 'reaction')`,
       )
       .bind(userId),
     db
       .prepare(
         `SELECT m.conversation_id, COUNT(*) AS n FROM messages m
          JOIN conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = ?
-         WHERE m.seq > cm.last_read_seq AND m.sender_id != ? AND m.kind != 'system'
+         WHERE m.seq > cm.last_read_seq AND m.sender_id != ? AND m.kind NOT IN ('system', 'reaction')
            AND m.deleted_at IS NULL GROUP BY m.conversation_id`,
       )
       .bind(userId, userId),
@@ -187,7 +219,7 @@ export async function loadSummaries(
     membersBy.set(m.conversation_id, list);
   }
   const lastBy = new Map(
-    (await hydrate(db, lasts!.results as MessageRow[])).map((m) => [m.conversationId, m]),
+    (await hydrate(db, lasts!.results as MessageRow[], null)).map((m) => [m.conversationId, m]),
   );
   const unreadBy = new Map(
     (unread!.results as { conversation_id: string; n: number }[]).map((r) => [

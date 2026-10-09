@@ -17,6 +17,8 @@ export type CallModel = {
   speakerOn: boolean;
   quality: 'good' | 'poor' | 'lost';
   cameraUnavailable: boolean;
+  /** The other person's media is arriving end-to-end encrypted and decrypting. */
+  encrypted: boolean;
   remoteVideo?: VideoTrack;
   localVideo?: VideoTrack;
   toggleMic: () => void;
@@ -87,6 +89,7 @@ function useLiveModel(): CallModel {
     speakerOn: s.speakerOn,
     quality: s.quality,
     cameraUnavailable: s.cameraUnavailable,
+    encrypted: s.encrypted === true,
     remoteVideo: tracks.remote,
     localVideo: tracks.local,
     toggleMic: () => void callController.toggleMic(),
@@ -120,6 +123,7 @@ function useSampleModel(peerId: string, initialKind: CallKind, accepted: boolean
     speakerOn,
     quality: sim.phase === 'reconnecting' ? 'lost' : 'good',
     cameraUnavailable: false,
+    encrypted: false,
     toggleMic: () => setMicOn((m) => !m),
     toggleCamera: () => {
       if (kind === 'voice') {

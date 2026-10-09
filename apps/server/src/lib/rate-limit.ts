@@ -30,6 +30,12 @@ export function clientIp(headers: { header: (name: string) => string | undefined
   return headers.header('cf-connecting-ip') ?? 'unknown';
 }
 
+/** Per-user rate limit (the caller must be authenticated). */
+export async function limitUser(env: Env, rule: RateRule, userId: string): Promise<void> {
+  if (!(await hit(env, rule, `user:${userId}`)))
+    throw new ApiError('rate_limited', 'Too many requests. Try again later.');
+}
+
 /** Per-client-IP rate limit for a route. */
 export const rateLimit =
   (rule: RateRule): MiddlewareHandler<AppEnv> =>
@@ -49,4 +55,10 @@ export const RULES = {
   refresh: { name: 'refresh', limit: 60, windowSec: 60 },
   invitePreview: { name: 'invite-preview', limit: 20, windowSec: 60 },
   usernameCheck: { name: 'username-check', limit: 30, windowSec: 60 },
+  /** Per user: each bundle fetch uses up one-time keys. */
+  keyBundles: { name: 'key-bundles', limit: 600, windowSec: 3600 },
+  /** Per user (messages and reactions; generous for real use, stops floods). */
+  sendMessage: { name: 'send-message', limit: 120, windowSec: 60 },
+  createAttachment: { name: 'create-attachment', limit: 60, windowSec: 60 },
+  startCall: { name: 'start-call', limit: 20, windowSec: 600 },
 } satisfies Record<string, RateRule>;

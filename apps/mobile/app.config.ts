@@ -109,6 +109,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ['expo-video', { supportsBackgroundPlayback: false, supportsPictureInPicture: false }],
     // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
     './plugins/withSceneLifecycle',
+    // End-to-end encryption: Signal's libsignal (pods/Maven; see the plugin).
+    './plugins/withLibSignal',
     // Dev builds reopen the last Metro server instead of showing the launcher, and
     // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.
     // after the Mac's LAN IP changes.

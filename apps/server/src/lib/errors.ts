@@ -16,14 +16,21 @@ const STATUS_BY_CODE: Record<ApiErrorCode, ContentfulStatusCode> = {
 export class ApiError extends Error {
   readonly code: ApiErrorCode;
   readonly status: ContentfulStatusCode;
+  readonly details: unknown;
 
-  constructor(code: ApiErrorCode, message: string) {
+  constructor(code: ApiErrorCode, message: string, details?: unknown) {
     super(message);
     this.code = code;
     this.status = STATUS_BY_CODE[code];
+    this.details = details;
   }
 }
 
-export function errorBody(code: ApiErrorCode, message: string, requestId?: string): ApiErrorBody {
-  return { error: { code, message, requestId } };
+export function errorBody(
+  code: ApiErrorCode,
+  message: string,
+  requestId?: string,
+  details?: unknown,
+): ApiErrorBody {
+  return { error: { code, message, requestId, ...(details !== undefined && { details }) } };
 }

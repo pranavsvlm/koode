@@ -26,6 +26,7 @@ import { useChat } from '@/stores/chat';
 import { usePreferences, type AppearancePreference } from '@/stores/preferences';
 import { generateRecoveryKey } from '@/features/auth/validation';
 import { useSession } from '@/stores/session';
+import { deviceCrypto } from '@/features/crypto';
 
 /**
  * DEVELOPMENT ONLY: walks through every screen so the UI can be reviewed and
@@ -605,6 +606,98 @@ export const MEDIA_TOUR: Step[] = [
   { name: 'done', run: () => mediaLog('done') },
 ];
 
+/**
+ * End-to-end encryption check against a second, independent libsignal
+ * implementation: scripts/e2ee-peer.mjs plays "Maya" with Signal's Node
+ * library. Messages, a photo, reactions and safety numbers go both ways, then
+ * an encrypted call (the peer checks LiveKit only ever forwards ciphertext).
+ */
+const e2eeLog = (label: string, value?: unknown) =>
+  console.log(`[tour-e2ee] ${label}${value === undefined ? '' : ` ${JSON.stringify(value)}`}`);
+const mayaChat = () => directWith(contactNamed('Maya Chen'));
+const myCrypto = () => deviceCrypto(useSession.getState().user!.id);
+const e2eeStep = (name: string, run: () => Promise<unknown>) => ({
+  name,
+  run: () =>
+    void run().catch((e: unknown) =>
+      e2eeLog(`${name} FAILED`, e instanceof Error ? e.message : String(e)),
+    ),
+});
+
+export const E2EE_TOUR: Step[] = [
+  {
+    name: 'register',
+    run: () => {
+      useDevSettings.getState().set({ sampleData: false });
+      signIn();
+    },
+  },
+  e2eeStep('keys', async () => e2eeLog('ready', { device: await myCrypto().deviceId() })),
+  { name: 'wait-for-peer', run: () => {} },
+  { name: 'wait-for-messages', run: () => {} },
+  e2eeStep('open-chat', async () => {
+    const chat = mayaChat();
+    e2eeLog('chat', { chat: !!chat });
+    if (chat) router.navigate(`/chat/${chat}`);
+  }),
+  e2eeStep('received', async () => {
+    const theirs = messagesIn(mayaChat()).filter((m) => m.senderId !== ME);
+    const photo = theirs.find((m) => m.attachment?.kind === 'image')?.attachment;
+    const remote = remoteOf(photo);
+    const size = remote ? new File(await download(remote)).size : null;
+    e2eeLog('received', {
+      texts: theirs.filter((m) => m.text).map((m) => m.text),
+      undecryptable: theirs.filter((m) => m.undecryptable).map((m) => m.undecryptable),
+      photo: photo?.kind === 'image' ? { width: photo.width, height: photo.height, size } : null,
+    });
+  }),
+  e2eeStep('send-text', async () => {
+    useChat.getState().send(mayaChat(), { text: 'Hi Maya 👋 sent from the app over libsignal' });
+  }),
+  e2eeStep(
+    'send-photo',
+    sendFile(() => prepareImage({ uri: e2eFile('gps.jpg'), width: 1600, height: 1200 })),
+  ),
+  e2eeStep('react', async () => {
+    const theirs = messagesIn(mayaChat()).find((m) => m.senderId !== ME && m.text);
+    if (theirs) await useChat.getState().toggleReaction(mayaChat(), theirs.id, '👍');
+  }),
+  e2eeStep('safety-number', async () => {
+    const maya = contactNamed('Maya Chen');
+    router.push({ pathname: '/safety/[id]', params: { id: maya } });
+    const devices = await myCrypto().devices(maya);
+    const numbers = await Promise.all(
+      devices.map(async (d) => (await myCrypto().safetyNumber(maya, d.identityKey)).displayable),
+    );
+    e2eeLog('safety', numbers);
+  }),
+  e2eeStep('verified', async () => {
+    const maya = contactNamed('Maya Chen');
+    await myCrypto().setVerified(maya, true);
+    e2eeLog('verification', await myCrypto().verification(maya));
+  }),
+  { name: 'back-to-chat', run: () => router.back() },
+  e2eeStep('reactions', async () => {
+    const mine = messagesIn(mayaChat()).filter((m) => m.senderId === ME);
+    e2eeLog(
+      'mine',
+      mine.map((m) => [m.text ?? m.attachment?.kind, m.status, m.reactions.map((r) => r.emoji)]),
+    );
+  }),
+  e2eeStep('call', async () => startCall(contactNamed('Maya Chen'), 'voice')),
+  { name: 'ringing', run: () => {} },
+  { name: 'in-call', run: () => {} },
+  { name: 'in-call-2', run: () => {}, shotAtMs: 1500 },
+  e2eeStep('call-status', async () => {
+    const s = callController.getSnapshot();
+    const audio = await callController.audioStats();
+    e2eeLog('call', { phase: s.phase, encrypted: s.encrypted, remote: s.remotePresent, audio });
+  }),
+  { name: 'in-call-3', run: () => {} },
+  e2eeStep('hang-up', async () => callController.hangUp()),
+  { name: 'done', run: () => e2eeLog('done') },
+];
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
@@ -633,7 +726,9 @@ export function useDevTour(mode: string | undefined) {
             ? PUSH_TOUR
             : mode === 'media'
               ? MEDIA_TOUR
-              : TOUR;
+              : mode === 'e2ee'
+                ? E2EE_TOUR
+                : TOUR;
     let i = 0;
     const tick = () => {
       const step = steps[i];

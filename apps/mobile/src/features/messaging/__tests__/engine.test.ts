@@ -1,4 +1,9 @@
-import type { AttachmentMeta, ConversationSummary, Message } from '@koode/shared';
+import type {
+  ConversationSummary,
+  Message,
+  OutgoingEnvelope,
+  StoredAttachment,
+} from '@koode/shared';
 import { ApiClientError } from '@/lib/api';
 import {
   HEARTBEAT_MS,
@@ -6,10 +11,11 @@ import {
   PONG_TIMEOUT_MS,
   TYPING_THROTTLE_MS,
   TYPING_TTL_MS,
+  type MessageCrypto,
   type MessagingApi,
   type SocketLike,
 } from '../engine';
-import { memoryStore } from '../types';
+import { memoryStore, type MessagingStore } from '../types';
 
 // ——— Test doubles ———
 
@@ -76,73 +82,139 @@ class FakeSocket implements SocketLike {
 const ME = 'usr_me';
 const MAYA = 'usr_maya';
 
+/**
+ * Stand-in encryption: an envelope is "enc:<plaintext>" for one device. The
+ * engine never looks inside envelopes; real libsignal is tested on devices.
+ */
+const seal = (plain: string) => `enc:${plain}`;
+const payload = (m: { id: string; conversationId: string }, rest: Record<string, unknown>) =>
+  JSON.stringify({ v: 1, id: m.id, conversationId: m.conversationId, ...rest });
+
 function fakeServer() {
   const state = {
     online: true,
     conversations: new Map<string, ConversationSummary>(),
-    messages: new Map<string, Message[]>(),
+    /** All envelopes per message (the server keeps one per device). */
+    messages: new Map<string, (Message & { all: OutgoingEnvelope[] })[]>(),
+    /** Each person's devices with keys. */
+    devices: new Map<string, number[]>([
+      [ME, [1]],
+      [MAYA, [1]],
+    ]),
     receipts: [] as { id: string; body: unknown }[],
+    /** What Maya's device 1 would read from each send. */
     sends: [] as string[],
+    sendKinds: [] as string[],
     rejectSend: null as ApiClientError | null,
-    attachments: new Map<string, AttachmentMeta>(),
-    uploads: [] as { id: string; part: string; uri: string }[],
+    attachments: new Map<string, StoredAttachment>(),
+    attachmentRequests: [] as unknown[],
+    uploads: [] as { id: string; part: string; uri: string; mimeType: string }[],
     failUpload: null as ApiClientError | null,
     expireUploads: false,
   };
   const ensureOnline = () => {
     if (!state.online) throw new ApiClientError('network', 'offline');
   };
-  const addConversation = (id: string) => {
+  const addConversation = (id: string, members = [ME, MAYA]) => {
     state.conversations.set(id, {
       id,
-      kind: 'direct',
+      kind: members.length > 2 ? 'group' : 'direct',
       title: null,
       createdAt: 1,
       lastSeq: 0,
       lastRev: 0,
       lastMessage: null,
       unreadCount: 0,
-      members: [
-        { userId: ME, role: 'member', lastDeliveredSeq: 0, lastReadSeq: 0 },
-        { userId: MAYA, role: 'member', lastDeliveredSeq: 0, lastReadSeq: 0 },
-      ],
+      members: members.map((userId) => ({
+        userId,
+        role: 'member' as const,
+        lastDeliveredSeq: 0,
+        lastReadSeq: 0,
+      })),
     });
     state.messages.set(id, []);
   };
-  const post = (
+  /** As this device (ME, 1) receives it: only its own envelope. */
+  const view = (m: Message & { all: OutgoingEnvelope[] }): Message => {
+    const { all, ...rest } = m;
+    return {
+      ...rest,
+      envelopes: all
+        .filter((e) => e.userId === ME && e.deviceId === 1)
+        .map(({ deviceId, type, body }) => ({ deviceId, type, body })),
+    };
+  };
+  const store = (
     conversationId: string,
-    senderId: string,
-    body: string,
-    id = `m-${Math.random()}`,
-    attachmentId: string | null = null,
+    m: Omit<Message, 'seq' | 'rev' | 'createdAt' | 'envelopes'> & { all: OutgoingEnvelope[] },
   ) => {
     const list = state.messages.get(conversationId)!;
-    const existing = list.find((m) => m.id === id);
-    if (existing) return existing;
+    const existing = list.find((x) => x.id === m.id);
+    if (existing) return view(existing);
     const c = state.conversations.get(conversationId)!;
-    const msg: Message = {
-      id,
-      conversationId,
+    const msg = {
+      ...m,
       seq: c.lastSeq + 1,
       rev: c.lastRev + 1,
-      senderId,
-      kind: attachmentId ? 'attachment' : 'text',
-      body,
-      replyToId: null,
-      attachment: attachmentId ? state.attachments.get(attachmentId)! : null,
-      system: null,
-      reactions: [],
-      deletedAt: null,
       createdAt: 2_000_000 + c.lastSeq,
+      envelopes: [],
     };
     list.push(msg);
     state.conversations.set(conversationId, {
       ...c,
       lastSeq: msg.seq,
       lastRev: msg.rev,
-      lastMessage: msg,
+      lastMessage: m.kind === 'reaction' ? c.lastMessage : view(msg),
     });
-    return msg;
+    return view(msg);
+  };
+  const base = {
+    encryption: 'signal' as const,
+    senderDevice: 1,
+    body: '',
+    replyToId: null,
+    attachment: null,
+    system: null,
+    targetId: null,
+    deletedAt: null,
+  };
+  /** A message from someone else, encrypted to my device. */
+  const post = (
+    conversationId: string,
+    senderId: string,
+    text: string,
+    opts: { id?: string; plain?: string; envelope?: boolean } = {},
+  ) => {
+    const id = opts.id ?? `00000000-0000-4000-8000-${String(Math.random()).slice(2, 14)}`;
+    const plain =
+      opts.plain ?? payload({ id, conversationId }, { t: 'text', body: text, replyToId: null });
+    return store(conversationId, {
+      ...base,
+      id,
+      conversationId,
+      senderId,
+      kind: 'text',
+      all: opts.envelope === false ? [] : [{ userId: ME, deviceId: 1, type: 3, body: seal(plain) }],
+    });
+  };
+  /** Someone's reaction ('' removes). */
+  const react = (
+    conversationId: string,
+    senderId: string,
+    targetId: string,
+    emoji: string | null,
+  ) => {
+    const id = `00000000-0000-4000-8000-${String(Math.random()).slice(2, 14)}`;
+    const plain = payload({ id, conversationId }, { t: 'reaction', targetId, emoji });
+    return store(conversationId, {
+      ...base,
+      id,
+      conversationId,
+      senderId,
+      kind: 'reaction',
+      targetId,
+      all: [{ userId: ME, deviceId: 1, type: 2, body: seal(plain) }],
+    });
   };
   /** Change an existing message on the server (new revision). */
   const edit = (conversationId: string, id: string, patch: Partial<Message>) => {
@@ -150,9 +222,10 @@ function fakeServer() {
     const list = state.messages.get(conversationId)!;
     const i = list.findIndex((m) => m.id === id);
     const next = { ...list[i]!, ...patch, rev: c.lastRev + 1 };
+    if (next.deletedAt !== null) next.all = [];
     list[i] = next;
     state.conversations.set(conversationId, { ...c, lastRev: next.rev });
-    return next;
+    return view(next);
   };
   const api: MessagingApi = {
     getAccessToken: async () => {
@@ -173,7 +246,7 @@ function fakeServer() {
     },
     messages: async (id, { before, after, changedSince, limit = 50 }) => {
       ensureOnline();
-      const all = state.messages.get(id)!;
+      const all = state.messages.get(id)!.map(view);
       if (changedSince !== undefined) {
         const rows = all.filter((m) => m.rev > changedSince).sort((a, b) => a.rev - b.rev);
         return { messages: rows.slice(0, limit), hasMore: rows.length > limit };
@@ -188,8 +261,39 @@ function fakeServer() {
     send: async (id, body) => {
       ensureOnline();
       if (state.rejectSend) throw state.rejectSend;
-      state.sends.push(body.body);
-      return post(id, ME, body.body, body.id, body.attachmentId ?? null);
+      // Exactly the current devices of the members, except mine (1).
+      const members = state.conversations.get(id)!.members.map((m) => m.userId);
+      const want = members.flatMap((u) =>
+        (state.devices.get(u) ?? []).filter((d) => !(u === ME && d === 1)).map((d) => `${u}.${d}`),
+      );
+      const got = body.envelopes.map((e) => `${e.userId}.${e.deviceId}`);
+      const missing = want.filter((k) => !got.includes(k));
+      const extra = got.filter((k) => !want.includes(k));
+      const split = (k: string) => ({
+        userId: k.split('.')[0]!,
+        deviceId: Number(k.split('.')[1]),
+      });
+      if (missing.length || extra.length)
+        throw new ApiClientError('conflict', 'Devices changed', 409, {
+          missing: missing.map(split),
+          extra: extra.map(split),
+        });
+      const toMaya = body.envelopes.find((e) => e.userId === MAYA && e.deviceId === 1);
+      if (toMaya) {
+        const p = JSON.parse(toMaya.body.slice(4));
+        state.sends.push(p.t === 'reaction' ? (p.emoji ?? '') : p.body);
+      }
+      state.sendKinds.push(body.kind);
+      return store(id, {
+        ...base,
+        id: body.id,
+        conversationId: id,
+        senderId: ME,
+        kind: body.kind,
+        attachment: body.attachmentId ? state.attachments.get(body.attachmentId)! : null,
+        targetId: body.targetId ?? null,
+        all: body.envelopes,
+      });
     },
     receipts: async (id, body) => {
       ensureOnline();
@@ -203,16 +307,17 @@ function fakeServer() {
     },
     createAttachment: async (_id, body) => {
       ensureOnline();
-      const meta: AttachmentMeta = {
+      state.attachmentRequests.push(body);
+      const meta: StoredAttachment = {
         id: `att-${state.attachments.size + 1}`,
-        kind: body.kind,
-        mimeType: body.mimeType,
+        kind: 'encrypted',
+        mimeType: 'application/octet-stream',
         sizeBytes: body.sizeBytes,
-        name: body.kind === 'document' ? body.name : null,
-        width: 'width' in body ? body.width : null,
-        height: 'height' in body ? body.height : null,
-        durationMs: 'durationMs' in body ? body.durationMs : null,
-        waveform: body.kind === 'voice' ? body.waveform : null,
+        name: null,
+        width: null,
+        height: null,
+        durationMs: null,
+        waveform: null,
         preview: null,
         hasThumbnail: false,
       };
@@ -227,20 +332,17 @@ function fakeServer() {
       }
       if (state.failUpload) throw state.failUpload;
       onProgress(0.5);
-      state.uploads.push({ id: attachmentId, part, uri: file.uri });
+      state.uploads.push({ id: attachmentId, part, uri: file.uri, mimeType: file.mimeType });
+      if (part === 'thumbnail')
+        state.attachments.set(attachmentId, {
+          ...state.attachments.get(attachmentId)!,
+          hasThumbnail: true,
+        });
       onProgress(1);
-    },
-    react: async (id, messageId, emoji) => {
-      ensureOnline();
-      const m = state.messages.get(id)!.find((x) => x.id === messageId)!;
-      const others = m.reactions.filter((r) => r.userId !== ME);
-      return edit(id, messageId, {
-        reactions: emoji ? [...others, { userId: ME, emoji }] : others,
-      });
     },
     deleteMessage: async (id, messageId) => {
       ensureOnline();
-      return edit(id, messageId, { body: '', attachment: null, reactions: [], deletedAt: 1 });
+      return edit(id, messageId, { deletedAt: 1, attachment: null });
     },
     renameGroup: async (id) => state.conversations.get(id)!,
     addMembers: async (id) => state.conversations.get(id)!,
@@ -251,21 +353,64 @@ function fakeServer() {
       return {};
     },
   };
-  return { state, api, addConversation, post, edit };
+  return { state, api, addConversation, post, react, edit };
+}
+
+/** Device crypto stand-in: knows devices as the server last told it (refresh reloads). */
+function fakeCrypto(server: ReturnType<typeof fakeServer>) {
+  const known = new Map<string, number[]>();
+  const calls = { decrypt: 0, refresh: 0, identityChanged: false };
+  const crypto: MessageCrypto = {
+    deviceId: async () => 1,
+    encrypt: async (userIds, plain) => {
+      if (calls.identityChanged) {
+        const e = new Error('Safety number changed');
+        e.name = 'IdentityChangedError';
+        throw e;
+      }
+      return userIds.flatMap((u) => {
+        if (!known.has(u)) known.set(u, [...(server.state.devices.get(u) ?? [])]);
+        return known
+          .get(u)!
+          .filter((d) => !(u === ME && d === 1))
+          .map((d) => ({ userId: u, deviceId: d, type: 2 as const, body: seal(plain) }));
+      });
+    },
+    decrypt: async (_sender, _device, envelope) => {
+      calls.decrypt++;
+      if (!envelope.body.startsWith('enc:')) throw new Error('Bad MAC');
+      return envelope.body.slice(4);
+    },
+    refresh: async (mismatch, userIds = []) => {
+      calls.refresh++;
+      for (const u of [...userIds, ...(mismatch?.missing ?? []).map((d) => d.userId)])
+        known.delete(u);
+    },
+  };
+  return { crypto, calls };
 }
 
 function setup(
-  opts: { readReceipts?: boolean; typingIndicators?: boolean; seedRandom?: number } = {},
+  opts: {
+    readReceipts?: boolean;
+    typingIndicators?: boolean;
+    seedRandom?: number;
+    store?: MessagingStore;
+    server?: ReturnType<typeof fakeServer>;
+  } = {},
 ) {
   const clock = fakeClock();
-  const server = fakeServer();
-  const store = memoryStore();
+  const server = opts.server ?? fakeServer();
+  const { crypto, calls } = fakeCrypto(server);
+  const store = (opts.store ?? memoryStore()) as ReturnType<typeof memoryStore>;
   const sockets: FakeSocket[] = [];
   const onSignedOut = jest.fn();
   let n = 0;
   const engine = new MessagingEngine({
     me: ME,
     api: server.api,
+    crypto,
+    sealFile: async (uri) => ({ uri: `${uri}.sealed`, key: 'a2V5', digest: 'ZGlnZXN0', size: 38 }),
     connect: (token) => {
       const s = new FakeSocket(token);
       sockets.push(s);
@@ -289,11 +434,13 @@ function setup(
     socket().open();
     await flush();
   };
-  return { clock, server, store, engine, sockets, socket, online, onSignedOut };
+  return { clock, server, store, engine, sockets, socket, online, onSignedOut, crypto, calls };
 }
 
-const bodies = (engine: MessagingEngine, id: string) =>
-  (engine.getSnapshot().messages[id] ?? []).map((m) => m.body);
+/** What's shown in a conversation (reactions are messages too, but not shown). */
+const shown = (engine: MessagingEngine, id: string) =>
+  (engine.getSnapshot().messages[id] ?? []).filter((m) => m.kind !== 'reaction');
+const bodies = (engine: MessagingEngine, id: string) => shown(engine, id).map((m) => m.body);
 
 // ——— Tests ———
 
@@ -335,7 +482,9 @@ describe('MessagingEngine', () => {
       seq: 1,
     });
     // The server echo over the socket doesn't duplicate it.
-    t.socket().receive({ type: 'message', message: t.server.state.messages.get('c1')![0] });
+    const { all: _all, ...echo } = t.server.state.messages.get('c1')![0]!;
+    t.socket().receive({ type: 'message', message: echo });
+    await flush();
     expect(bodies(t.engine, 'c1')).toEqual(['hi Maya']);
   });
 
@@ -427,6 +576,7 @@ describe('MessagingEngine', () => {
     await t.online();
     t.socket().receive({ type: 'message', message: t.server.post('c1', MAYA, 'one') });
     t.socket().receive({ type: 'message', message: t.server.post('c1', MAYA, 'two') });
+    await flush();
     expect(bodies(t.engine, 'c1')).toEqual(['one', 'two']);
     expect(t.engine.getSnapshot().conversations[0]).toMatchObject({ unreadCount: 2, lastSeq: 2 });
     await t.clock.advance(500);
@@ -532,6 +682,18 @@ describe('MessagingEngine', () => {
     expect(t.engine.getSnapshot().conversations.map((c) => c.id)).toEqual(['c2']);
   });
 
+  it('learns the name of someone new in a conversation', async () => {
+    const t = setup();
+    const users = jest.spyOn(t.server.api, 'users');
+    await t.engine.start();
+    await t.online();
+    const before = users.mock.calls.length;
+    t.server.addConversation('c3', [ME, 'usr_new']);
+    t.socket().receive({ type: 'conversation', conversationId: 'c3' });
+    await flush();
+    expect(users.mock.calls.length).toBeGreaterThan(before);
+  });
+
   it('stops and reports when the account is signed out', async () => {
     const t = setup();
     t.server.api.getAccessToken = async () => {
@@ -555,6 +717,10 @@ describe('MessagingEngine', () => {
     const again = new MessagingEngine({
       me: ME,
       api: { ...t.server.api, getAccessToken: () => new Promise(() => {}) }, // never connects
+      crypto: t.crypto,
+      sealFile: async () => {
+        throw new Error('unused');
+      },
       connect: () => new FakeSocket('x'),
       store: t.store,
       uuid: () => 'x',
@@ -575,13 +741,14 @@ describe('MessagingEngine — edits, files and groups', () => {
     await t.engine.start();
     await t.online();
     t.socket().close();
-    t.server.edit('c1', first.id, { reactions: [{ userId: MAYA, emoji: '❤️' }] });
-    t.server.edit('c1', first.id, { body: '', deletedAt: 5 });
+    t.server.react('c1', MAYA, first.id, '❤️');
+    t.server.edit('c1', first.id, { deletedAt: 5 });
     t.server.post('c1', MAYA, 'third');
     await t.clock.advance(1000);
     t.socket().open();
     await flush();
-    const list = t.engine.getSnapshot().messages.c1!;
+    const list = shown(t.engine, 'c1');
+    expect(list[0]!.reactions).toEqual([]); // reactions go with the message
     expect(list.map((m) => [m.body, m.deletedAt])).toEqual([
       ['', 5],
       ['second', null],
@@ -596,16 +763,18 @@ describe('MessagingEngine — edits, files and groups', () => {
     await t.engine.start();
     await t.online(); // newest 50: m11…m60
     t.socket().close();
-    t.server.edit('c1', msgs[0]!.id, { reactions: [{ userId: MAYA, emoji: '👍' }] }); // m1, not loaded
-    t.server.edit('c1', msgs[59]!.id, { reactions: [{ userId: MAYA, emoji: '👍' }] }); // m60
+    t.server.react('c1', MAYA, msgs[0]!.id, '👍'); // m1, not loaded
+    t.server.react('c1', MAYA, msgs[59]!.id, '👍'); // m60
     await t.clock.advance(1000);
     t.socket().open();
     await flush();
-    const list = t.engine.getSnapshot().messages.c1!;
+    const list = shown(t.engine, 'c1');
     expect(list).toHaveLength(50);
     expect(list.at(-1)!.reactions).toHaveLength(1);
     await t.engine.loadOlder('c1');
-    expect(t.engine.getSnapshot().messages.c1![0]!.body).toBe('m1');
+    const m1 = shown(t.engine, 'c1')[0]!;
+    expect(m1.body).toBe('m1');
+    expect(m1.reactions).toEqual([{ userId: MAYA, emoji: '👍' }]); // applied once it loaded
   });
 
   const photo = {
@@ -632,14 +801,31 @@ describe('MessagingEngine — edits, files and groups', () => {
       state: 'pending',
     });
     await flush();
-    expect(t.server.state.uploads).toEqual([{ id: 'att-1', part: 'content', uri: photo.uri }]);
+    // Only ciphertext goes up; the server learns its size and nothing else.
+    expect(t.server.state.attachmentRequests).toEqual([{ sizeBytes: 38 }]);
+    expect(t.server.state.uploads).toEqual([
+      {
+        id: 'att-1',
+        part: 'content',
+        uri: `${photo.uri}.sealed`,
+        mimeType: 'application/octet-stream',
+      },
+    ]);
     const sent = t.engine.getSnapshot().messages.c1![0]!;
     expect(sent).toMatchObject({
       id: local.id,
       state: 'sent',
       body: 'look',
-      attachment: { id: 'att-1' },
+      attachment: {
+        id: 'att-1',
+        kind: 'image',
+        width: 4,
+        height: 3,
+        secret: { content: { key: 'a2V5', digest: 'ZGlnZXN0' }, thumbnail: null },
+      },
     });
+    // What the description of the file looks like is in Maya's envelope.
+    expect(t.server.state.sends).toEqual(['look']);
     expect(t.engine.getSnapshot().progress).toEqual({});
     expect(uploaded).not.toHaveBeenCalled(); // (not wired in this setup)
   });
@@ -700,24 +886,40 @@ describe('MessagingEngine — edits, files and groups', () => {
     expect(t.store.dump().messages).toEqual([]);
   });
 
-  it('shows my reaction at once and keeps the server’s copy', async () => {
+  it('reacts with an encrypted message, shown at once and withdrawn if it can’t be sent', async () => {
     const t = setup();
     t.server.addConversation('c1');
     const m = t.server.post('c1', MAYA, 'hi');
     await t.engine.start();
     await t.online();
     const pending = t.engine.react('c1', m.id, '👍');
-    expect(t.engine.getSnapshot().messages.c1![0]!.reactions).toEqual([
-      { userId: ME, emoji: '👍' },
-    ]);
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([{ userId: ME, emoji: '👍' }]);
     await pending;
-    expect(t.engine.getSnapshot().messages.c1![0]!.rev).toBe(2);
+    expect(t.server.state.sendKinds).toEqual(['reaction']);
+    expect(t.server.state.sends).toEqual(['👍']);
 
     t.server.state.online = false;
     await expect(t.engine.react('c1', m.id, '❤️')).rejects.toThrow();
-    expect(t.engine.getSnapshot().messages.c1![0]!.reactions).toEqual([
-      { userId: ME, emoji: '👍' },
-    ]);
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([{ userId: ME, emoji: '👍' }]);
+    t.server.state.online = true;
+    await t.engine.react('c1', m.id, null);
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([]);
+  });
+
+  it('counts each person’s latest reaction', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const m = t.server.post('c1', MAYA, 'hi');
+    await t.engine.start();
+    await t.online();
+    for (const emoji of ['👍', '😂']) {
+      t.socket().receive({ type: 'message', message: t.server.react('c1', MAYA, m.id, emoji) });
+      await flush();
+    }
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([{ userId: MAYA, emoji: '😂' }]);
+    t.socket().receive({ type: 'message', message: t.server.react('c1', MAYA, m.id, null) });
+    await flush();
+    expect(shown(t.engine, 'c1')[0]!.reactions).toEqual([]);
   });
 
   it('deletes for everyone and ignores stale copies arriving later', async () => {
@@ -731,11 +933,10 @@ describe('MessagingEngine — edits, files and groups', () => {
     await t.engine.deleteForEveryone('c1', sent.id);
     expect(t.engine.getSnapshot().messages.c1![0]).toMatchObject({ body: '', deletedAt: 1 });
     // A late socket echo of the original must not bring the text back.
-    t.socket().receive({
-      type: 'message',
-      message: { ...t.server.state.messages.get('c1')![0], body: 'oops', deletedAt: null, rev: 1 },
-    });
-    expect(t.engine.getSnapshot().messages.c1![0]!.body).toBe('');
+    const { all: _all, ...original } = t.server.state.messages.get('c1')![0]!;
+    t.socket().receive({ type: 'message', message: { ...original, deletedAt: null, rev: 1 } });
+    await flush();
+    expect(t.engine.getSnapshot().messages.c1![0]).toMatchObject({ body: '', deletedAt: 1 });
   });
 
   it('forgets a conversation when I leave or am removed', async () => {
@@ -765,6 +966,7 @@ describe('MessagingEngine — edits, files and groups', () => {
     await t.online();
     const base = t.server.post('c1', MAYA, 'x');
     t.socket().receive({ type: 'message', message: base });
+    await flush();
     t.socket().receive({
       type: 'message',
       message: {
@@ -773,10 +975,115 @@ describe('MessagingEngine — edits, files and groups', () => {
         seq: 2,
         rev: 2,
         kind: 'system',
-        body: '',
+        encryption: 'none',
+        senderDevice: null,
+        envelopes: [],
         system: { action: 'renamed', actorId: MAYA, targetIds: [], title: 'New' },
       },
     });
+    await flush();
     expect(t.engine.getSnapshot().conversations[0]!.unreadCount).toBe(1);
+  });
+});
+
+describe('MessagingEngine — end-to-end encryption', () => {
+  it('decrypts each message once, even when it arrives twice', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    const m = t.server.post('c1', MAYA, 'once');
+    t.socket().receive({ type: 'message', message: m });
+    await t.engine.sync(); // the same message in a catch-up page
+    t.socket().receive({ type: 'message', message: m });
+    await flush();
+    expect(bodies(t.engine, 'c1')).toEqual(['once']);
+    expect(t.calls.decrypt).toBe(1);
+  });
+
+  it('uses the decrypted copy it cached instead of decrypting again', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    for (let i = 1; i <= 3; i++) t.server.post('c1', MAYA, `m${i}`);
+    await t.engine.start();
+    await t.online();
+    expect(t.calls.decrypt).toBe(3);
+    t.engine.stop();
+    // Restarted with nothing in memory: the copies are only in the cache.
+    const again = setup({
+      server: t.server,
+      store: { ...t.store, load: async () => ({ conversations: [], messages: [], users: [] }) },
+    });
+    await again.engine.start();
+    await again.online();
+    expect(bodies(again.engine, 'c1')).toEqual(['m1', 'm2', 'm3']);
+    expect(again.calls.decrypt).toBe(0);
+  });
+
+  it('re-encrypts for the right devices when the server says they changed', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.engine.send('c1', 'first');
+    await flush();
+    t.server.state.devices.set(MAYA, [1, 2]); // Maya signed in on an iPad
+    t.server.state.devices.set(ME, [1, 3]); // and so did I
+    t.engine.send('c1', 'second');
+    await flush();
+    expect(t.calls.refresh).toBe(1);
+    expect(shown(t.engine, 'c1').map((m) => m.state)).toEqual(['sent', 'sent']);
+    const last = t.server.state.messages.get('c1')!.at(-1)!;
+    expect(last.all.map((e) => `${e.userId}.${e.deviceId}`).sort()).toEqual([
+      `${MAYA}.1`,
+      `${MAYA}.2`,
+      `${ME}.3`,
+    ]);
+  });
+
+  it('fails a send when a safety number changed, without retrying', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.calls.identityChanged = true;
+    t.engine.send('c1', 'hello?');
+    await flush();
+    expect(shown(t.engine, 'c1')[0]!.state).toBe('failed');
+    expect(t.server.state.sends).toEqual([]);
+  });
+
+  it('marks messages it can’t read, without trusting misplaced content', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    t.server.addConversation('c2');
+    t.server.post('c1', MAYA, 'garbled', { plain: 'not json' });
+    // A valid payload, but for another conversation: the server moved it.
+    t.server.post('c1', MAYA, 'moved', {
+      id: '00000000-0000-4000-8000-00000000abcd',
+      plain: payload(
+        { id: '00000000-0000-4000-8000-00000000abcd', conversationId: 'c2' },
+        { t: 'text', body: 'moved', replyToId: null },
+      ),
+    });
+    t.server.post('c1', MAYA, 'not for this device', { envelope: false });
+    await t.engine.start();
+    await t.online();
+    expect(shown(t.engine, 'c1').map((m) => [m.body, m.undecryptable])).toEqual([
+      ['', 'failed'],
+      ['', 'failed'],
+      ['', 'missing'],
+    ]);
+  });
+
+  it('keeps showing pre-encryption messages as they were', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const m = t.server.post('c1', MAYA, 'x');
+    t.server.edit('c1', m.id, { encryption: 'none', body: 'from before Phase 8' });
+    await t.engine.start();
+    await t.online();
+    expect(bodies(t.engine, 'c1')).toEqual(['from before Phase 8']);
+    expect(t.calls.decrypt).toBe(0);
   });
 });

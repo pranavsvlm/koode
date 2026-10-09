@@ -136,12 +136,16 @@ No email address, phone number or password is collected. The API is documented i
      recovery key.
 7. **Abuse protection:**
    - Auth and preview routes are rate-limited with fixed windows in D1, keyed by an
-     HMAC of the client IP (raw IPs are never stored).
+     HMAC of the client IP (raw IPs are never stored). Since Phase 8, sending
+     messages, creating uploads, starting calls and fetching key bundles are also
+     limited per user.
    - All bodies are validated by the shared Zod schemas, and error messages never
-     echo input.
+     echo input. JSON bodies are capped by what is actually read (16 KB by default;
+     512 KB for key uploads, 4 MB for message sends, 256 KB for calls).
    - Names reject control and bidi-override characters.
 8. **Audit:** registrations, logins, recoveries, refresh-token reuse, device and
-   invite changes are recorded without any secrets.
+   invite changes, key publication, refused identity-key changes, group changes and
+   moderator deletions are recorded without any secrets or message content.
 9. **Planned:** linking a new device from an existing one (QR).
 
 ## Messaging (implemented, Phase 4)
@@ -190,9 +194,9 @@ app ◄──WebSocket events──── UserSocket DO ◄───────
 - **Directory:** `GET /v1/users` lists every active member of the instance (it's
   invite-only), with public profile fields only.
 - **Device-only:** pin, mute and "delete for me".
-- **End-to-end encryption (Phase 8):** message bodies are plaintext in D1 and the cache
-  today. Each message row carries an `encryption` column, and Phase 8 adds per-device
-  ciphertext envelopes. Until then, the server can read messages.
+- **End-to-end encryption:** since Phase 8 the server stores and relays only
+  per-device ciphertext envelopes; see "End-to-end encryption" below. Rows from
+  before Phase 8 keep `encryption = 'none'`.
 
 ## Media and groups (implemented, Phase 7)
 
@@ -329,10 +333,10 @@ One-to-one voice and video calls. Group calls are not in scope yet.
   - Config plugins `@livekit/react-native-expo-plugin` and
     `@config-plugins/react-native-webrtc` add camera and microphone usage strings.
   - `UIBackgroundModes: audio` keeps a call's audio alive in the background.
-- **Encryption:** media is protected by DTLS-SRTP between each device and the LiveKit
-  server, **not end to end**: the LiveKit server can access the media. Phase 8 adds
-  LiveKit E2EE (frame encryption through `RNE2EEManager`) with the room key
-  distributed over the E2EE messaging channel, never in the token.
+- **Encryption:** DTLS-SRTP to the LiveKit server, plus **end-to-end frame
+  encryption** (Phase 8): every audio and video frame is encrypted with the call's
+  media key, which travels only in Signal envelopes. The SFU forwards ciphertext. See
+  "End-to-end encryption" below.
 - **Hosting:** development uses a local `livekit-server --dev` (no account, no cost).
   LiveKit Cloud or a self-hosted server for real use is **pending your approval**.
 
@@ -368,7 +372,8 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
   - Each device registers with `PUT /v1/push`, sending its alert token (APNs/FCM),
     its PushKit token (iOS) and its notification settings.
   - The server enforces those settings when sending: direct messages, groups,
-    calls, and previews (message text on/off).
+    calls. (`previews` is still accepted; the server can't read encrypted messages,
+    so it no longer changes anything.)
   - A token belongs to one phone. Registering it moves it off any older device
     (e.g. a previous account on the same phone).
   - Sign-out and device removal delete the registration.
@@ -388,9 +393,9 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
   `missed` at the 45 s timeout and sends the missed-call push, even if the caller's
   app vanished. The lazy sweep stays as a backstop, with a 15 s grace period.
 - **Payload privacy:** the custom data (`PushData`) never contains message text, only
-  ids. Text appears only in the visible notification, and only if that device allows
-  previews. Until Phase 8 that text passes through Apple's or Google's push service.
-  With E2EE, a Notification Service Extension will decrypt it on the device instead.
+  ids. Message alerts say "New message" from the sender or group: the server can't
+  read encrypted messages, and reactions are never pushed. Showing text would need a
+  Notification Service Extension that decrypts on the device (not built).
 
 ### iOS calling (PushKit + CallKit)
 
@@ -428,37 +433,157 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
     self-managed `ConnectionService`).
   - All Android push behaviour is untested (no device or emulator; see Known risks).
 
-## End-to-end encryption (planned, Phase 8)
+## End-to-end encryption (Phase 8)
 
 **Rules:**
 
 - Never invent cryptography.
-- Use an established, reviewed protocol and library.
-- Do not claim E2EE until messages, attachments and call media have been verified.
-- **Until Phase 8 is complete, traffic is protected by TLS only. The server can read
-  message contents, so do not use the app for sensitive conversations.**
+- Do not call Koode end-to-end encrypted until messages, attachments and call media
+  have been verified.
 
-| Candidate          | Protocol        | Licence    | RN integration                                        | Notes                                                                 |
-| ------------------ | --------------- | ---------- | ----------------------------------------------------- | --------------------------------------------------------------------- |
-| vodozemac (Matrix) | Olm / Megolm    | Apache-2.0 | Custom Expo module over its Swift/Kotlin bindings     | Audited (2022); used in production by Element X                       |
-| libsignal          | Signal protocol | AGPL-3.0   | Custom Expo module over official Swift/Java libraries | Gold-standard protocol; maintainers do not support use outside Signal |
-| OpenMLS            | MLS (RFC 9420)  | MIT        | Custom Expo module via UniFFI                         | Best fit for groups; least mature mobile tooling                      |
+### Library
 
-Phase 8 starts with a time-boxed spike that builds a minimal native module around the
-leading candidate. Evaluation criteria:
+- **libsignal v0.103.0** (Signal's own implementation), chosen by the project owner:
+  - Protocol: PQXDH key agreement (X25519 + ML-KEM/Kyber), Double Ratchet
+    sessions, numeric safety-number fingerprints, and AES-256-GCM for attachments.
+  - Licence: AGPL-3.0. Koode's source must be offered to its users.
+  - Signal doesn't support use of libsignal outside its own apps; Koode pins a
+    release and updates deliberately.
+- **Packaging:**
+  - iOS uses Signal's CocoaPod with its verified prebuilt FFI archive (no Rust
+    toolchain).
+  - Android uses Signal's Maven repository.
+  - The test peer uses `@signalapp/libsignal-client` on Node, so interoperability
+    is tested against a second implementation.
 
-- audit status
-- licence compatibility
-- binding maintenance burden
-- group support
-- multi-device support
+### Model
 
-Attachments will be encrypted client-side with a random per-file key; that key travels
-inside the E2EE message, and R2 stores only ciphertext. Call media uses LiveKit E2EE
-with keys distributed over the encrypted channel.
+- **Addresses:** each device is its own Signal address: `(userId, deviceId)`, where
+  `deviceId` is a small number per account. Each device has its own identity key,
+  and private keys never leave the device. A new device (recovery) is a new address
+  with a new identity.
+- **Key directory (server):**
+  - Each device publishes its identity key, registration id, a signed prekey, a
+    last-resort Kyber prekey, and batches of one-time EC and Kyber prekeys.
+  - Fetching a person's bundles hands out (and deletes) one one-time key per device.
+  - An identity key can never change for a device.
+- **Sessions:**
+  - Messages are encrypted separately to every device of every member (pairwise
+    "client fan-out", how Signal handled small groups), including the sender's own
+    other devices.
+  - Removing someone from a group therefore excludes them from the next message
+    immediately; there are no group keys to rotate.
+  - The server rejects a send that doesn't cover exactly the current devices (409
+    with the missing/extra lists); the client refreshes and retries.
+- **Encrypted payload:** text, reply reference, reactions (sent as their own
+  encrypted messages) and all attachment metadata (type, name, size, dimensions,
+  duration, waveform, preview) plus the file key and digest.
+- **Attachments:** each file is encrypted on the device with a random 256-bit key
+  (AES-256-GCM via libsignal), and the SHA-256 of the ciphertext is checked before
+  decrypting. R2 holds only ciphertext, of kind `encrypted`. Video posters are
+  encrypted with their own key.
+- **Calls:** the caller picks a random 32-byte key per call and sends it to exactly
+  the callee's devices as Signal envelopes with the call request (the caller
+  chooses the call id, so the encrypted key can name its call). The answering
+  device receives its envelope from `accept`. LiveKit end-to-end encryption (frame
+  encryption with a shared key, PBKDF2-derived AES-GCM) uses it, so the SFU
+  forwards ciphertext only. There's no unencrypted fallback: without a key, the
+  call fails.
+- **Notifications:** pushes can't contain message text any more; the server doesn't
+  have it. They say "New message" from the sender or group.
+- **Trust:**
+  - Trust on first use per device.
+  - A changed identity key on a known device is refused and shown as a warning
+    (that should never happen legitimately).
+  - Safety numbers (60 digits per device pair) can be compared in person and
+    marked verified. A verified contact who adds a device or whose key changes gets
+    a "safety number changed" notice.
+- **Storage on the device:**
+  - Identity, prekeys and sessions are in the Keychain (iOS: after first unlock,
+    this device only).
+  - Decrypted messages are cached in the app's SQLite database and files, under
+    the platform's data protection.
 
-Even with E2EE, the server will still see metadata: who talks to whom, when, and how
-much.
+### Implementation
+
+- **Native module** (`modules/koode-signal`, iOS only for now): libsignal's stores
+  live in the Keychain; protocol calls run on one serial queue; file encryption runs
+  apart. The plaintext of a message crosses the bridge as UTF-8 text.
+- **Device crypto** (`src/features/crypto`):
+  - **Keys:** a new server device starts from a fresh identity; nothing from an
+    earlier sign-in carries over, because Keychain items can survive reinstalls. It
+    publishes a signed prekey, a last-resort Kyber key, and 100 one-time EC and
+    Kyber prekeys each.
+  - **Top-ups and rotation:** one-time keys are topped up below 25 (after PreKey
+    messages arrive, and at start), with ids never reused. The signed prekey
+    rotates monthly.
+  - **Lost keys:** if the server has keys this Keychain doesn't, the app stops
+    with "keys lost"; the only fix is signing out and in.
+  - **Sessions and devices:** sessions start from bundles only where none exists.
+    Device lists are cached for 10 minutes and dropped on a 409.
+- **Payload** (`Payload` in `packages/shared/src/keys.ts`, versioned JSON):
+  - Message payloads name their own message id and conversation, and a reaction
+    names its target. Receivers check them, so the server can't move ciphertext
+    between messages or chats.
+  - The call key names its call.
+- **Server:**
+  - **Key directory:** `/v1/keys` publishes, tops up, gives status, lists devices,
+    and hands out bundles (one-time keys are consumed atomically).
+  - **Device numbers:** `devices.signal_device_id` is 1, 2, 3 … per account and
+    never reused.
+  - **Sends:** checked for exact device coverage (409 with `{missing, extra}`).
+  - **Storage:** `message_envelopes` and `call_envelopes`.
+  - **Who gets what:** each member's realtime event carries only their devices'
+    envelopes; history returns only the reading device's; conversation summaries
+    carry none.
+- **Engine:**
+  - **Decrypting once:** each message is decrypted at most once. It checks memory,
+    then the SQLite cache, before the ratchet. Arrivals are opened in order, and
+    content already opened is never replaced.
+  - **Unreadable messages:** they show as "couldn't be decrypted" (or "not
+    available on this device" for messages from before this device existed).
+  - **Reactions:** latest per person wins, applied to targets as they load.
+  - **Sending:** encrypted per attempt; a 409 refreshes devices and membership and
+    retries (3 attempts). A changed safety number fails the send rather than
+    retrying.
+- **Attachments:**
+  - The app encrypts the processed file (and video poster) into the outbox before
+    creating the upload. The server learns only the ciphertext size.
+  - Downloads are digest-checked and decrypted into the cache. A partial or altered
+    file is never cached.
+- **Trust UI:** a contact's "Verify Safety Number" screen shows one 60-digit number
+  per device. Marking verified records the device set; any later difference shows
+  "Safety number changed".
+
+### Verification status (Phase 8)
+
+Interoperability was tested against Signal's Node implementation
+(`scripts/e2ee-peer.mjs`, 17/17 checks):
+
+- messages, photos and reactions in both directions;
+- identical safety numbers;
+- the call key;
+- the app decrypting a Node peer's encrypted audio;
+- a wrong-key listener getting no audio;
+- the SFU reporting every track GCM-encrypted.
+
+**Not verified:**
+
+- the app → peer audio direction, because the Simulator's microphone is silent;
+- Android, where the module isn't written;
+- two physical devices;
+- any independent security review.
+
+### Still visible to the server
+
+Who talks to whom and when; message sizes; group membership and titles; display
+names and profiles; call times and
+durations; IP addresses; ciphertext sizes (so roughly how long a message or file
+is); which message a reaction is for (not the emoji). Messages sent before Phase 8
+stay plaintext on the server (development data only). Ciphertext is kept with its
+message until the message is deleted for everyone. The Double Ratchet's keys are
+gone from the devices by then, so stored ciphertext can't be decrypted later even
+by the recipients.
 
 ## Security baseline
 

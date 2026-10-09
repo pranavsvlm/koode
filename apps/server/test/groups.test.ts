@@ -1,13 +1,13 @@
-import { SELF } from 'cloudflare:test';
+import { env, SELF } from 'cloudflare:test';
 import {
-  AttachmentMeta,
   ConversationSummary,
+  StoredAttachment,
   Message,
   type AuthSession,
   type SystemEvent,
 } from '@koode/shared';
 import { describe, expect, it } from 'vitest';
-import { api, openSocket, registerUser, twoUsers, uuid } from './helpers';
+import { api, openSocket, registerUser, sendMessage, twoUsers } from './helpers';
 
 async function threeUsers() {
   const { maya, dan } = await twoUsers();
@@ -72,10 +72,7 @@ describe('group administration', () => {
   it('adds people, who see the group from now on', async () => {
     const { maya, dan, sam } = await threeUsers();
     const g = await group(maya, [dan]);
-    await api(`/conversations/${g.id}/messages`, {
-      body: { id: uuid(), body: 'before Sam' },
-      token: maya.accessToken,
-    });
+    await sendMessage(maya, g.id, 'before Sam');
     const samSocket = await openSocket(sam.accessToken);
     await samSocket.next('ready');
 
@@ -107,10 +104,10 @@ describe('group administration', () => {
   it('removes people, who then lose access to messages and files', async () => {
     const { maya, dan } = await twoUsers();
     const g = await group(maya, [dan]);
-    const meta = AttachmentMeta.parse(
+    const meta = StoredAttachment.parse(
       (
         await api(`/conversations/${g.id}/attachments`, {
-          body: { kind: 'image', mimeType: 'image/jpeg', sizeBytes: 4, width: 1, height: 1 },
+          body: { sizeBytes: 4 },
           token: maya.accessToken,
         })
       ).json,
@@ -120,10 +117,7 @@ describe('group administration', () => {
       headers: { authorization: `Bearer ${maya.accessToken}`, 'content-length': '4' },
       body: new Uint8Array(new ArrayBuffer(4)),
     });
-    await api(`/conversations/${g.id}/messages`, {
-      body: { id: uuid(), attachmentId: meta.id },
-      token: maya.accessToken,
-    });
+    await sendMessage(maya, g.id, 'photo', { attachmentId: meta.id });
     const danSocket = await openSocket(dan.accessToken);
     await danSocket.next('ready');
 
@@ -190,20 +184,29 @@ describe('group administration', () => {
   it('lets group admins delete anyone’s message', async () => {
     const { maya, dan } = await twoUsers();
     const g = await group(maya, [dan]);
-    const m = Message.parse(
-      (
-        await api(`/conversations/${g.id}/messages`, {
-          body: { id: uuid(), body: 'spam' },
-          token: dan.accessToken,
-        })
-      ).json,
-    );
+    const m = Message.parse((await sendMessage(dan, g.id, 'spam')).json);
     const res = await api(`/conversations/${g.id}/messages/${m.id}`, {
       method: 'DELETE',
       token: maya.accessToken,
     });
     expect(res.status).toBe(200);
     expect(res.json.deletedAt).not.toBeNull();
+
+    // Moderation and membership changes are audited — who and where, never content.
+    const { results } = await env.DB.prepare(
+      'SELECT event, user_id, metadata FROM audit_events WHERE event IN (?, ?) ORDER BY id',
+    )
+      .bind('group_changed', 'message_deleted')
+      .all<{ event: string; user_id: string; metadata: string }>();
+    expect(results.map((r) => [r.event, r.user_id])).toEqual([
+      ['group_changed', maya.user.id],
+      ['message_deleted', maya.user.id],
+    ]);
+    expect(JSON.parse(results[1]!.metadata)).toEqual({
+      conversationId: g.id,
+      senderId: dan.user.id,
+    });
+    expect(results.map((r) => r.metadata).join()).not.toContain('spam');
   });
 
   it('lets anyone leave a group but not a direct chat', async () => {

@@ -13,6 +13,7 @@ import { me } from './routes/me';
 import { calls } from './routes/calls';
 import { push } from './routes/push';
 import { attachments } from './routes/attachments';
+import { keys } from './routes/keys';
 import { conversations } from './routes/conversations';
 import { realtime } from './routes/realtime';
 import { users } from './routes/users';
@@ -47,13 +48,14 @@ export function createApp() {
   app.route(`${API_PREFIX}/calls`, calls);
   app.route(`${API_PREFIX}/push`, push);
   app.route(`${API_PREFIX}/attachments`, attachments);
+  app.route(`${API_PREFIX}/keys`, keys);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found', c.get('requestId')), 404));
 
   app.onError((err, c) => {
     const id = c.get('requestId');
     if (err instanceof ApiError) {
-      return c.json(errorBody(err.code, err.message, id), err.status);
+      return c.json(errorBody(err.code, err.message, id, err.details), err.status);
     }
     // Log the error class and message only; never echo internals to the client.
     console.error(

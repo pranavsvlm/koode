@@ -2,24 +2,30 @@ import { DurableObject } from 'cloudflare:workers';
 import {
   MAX_GROUP_MEMBERS,
   type ApiErrorCode,
+  type Envelope,
   type Message,
+  type OutgoingEnvelope,
   type ServerEvent,
   type SystemEvent,
 } from '@koode/shared';
+import { coverage, keyedDevices } from '../keys/devices';
+import { auditStatement } from '../lib/audit';
 import { attachmentKeys } from '../media/storage';
-import {
-  hydrate,
-  loadMessage,
-  MESSAGE_SELECT,
-  notifyUsers,
-  type MessageRow,
-} from '../messaging/rows';
+import { loadMessage, loadRow, notifyUsers, toMessage, type MessageRow } from '../messaging/rows';
 import { pushMessage } from '../push/dispatch';
 
 export type RoomResult<T> =
-  { ok: true; value: T } | { ok: false; code: ApiErrorCode; message: string };
+  { ok: true; value: T } | { ok: false; code: ApiErrorCode; message: string; details?: unknown };
 
-const fail = (code: ApiErrorCode, message: string) => ({ ok: false as const, code, message });
+const fail = (code: ApiErrorCode, message: string, details?: unknown) => ({
+  ok: false as const,
+  code,
+  message,
+  ...(details !== undefined && { details }),
+});
+
+/** D1 allows 100 bound parameters per statement: 5 per envelope row. */
+const ENVELOPES_PER_INSERT = 20;
 
 type Role = 'member' | 'admin';
 
@@ -97,19 +103,51 @@ export class ConversationRoom extends DurableObject<Env> {
 
   // ——— Messages ———
 
+  /**
+   * Send a message to every member, as ciphertext per device. Members (in
+   * realtime) each get their own devices' envelopes.
+   */
+  private async publish(row: MessageRow) {
+    const db = this.env.DB;
+    const byUser = new Map<string, Envelope[]>();
+    if (row.encryption === 'signal' && row.deleted_at === null) {
+      const { results } = await db
+        .prepare('SELECT user_id, device, type, body FROM message_envelopes WHERE message_id = ?')
+        .bind(row.id)
+        .all<{ user_id: string; device: number; type: 2 | 3; body: string }>();
+      for (const e of results) {
+        const list = byUser.get(e.user_id) ?? [];
+        list.push({ deviceId: e.device, type: e.type, body: e.body });
+        byUser.set(e.user_id, list);
+      }
+    }
+    await Promise.allSettled(
+      [...this.members.keys()].map((u) =>
+        notifyUsers(this.env, [u], {
+          type: 'message',
+          message: toMessage(row, byUser.get(u) ?? []),
+        } satisfies ServerEvent),
+      ),
+    );
+  }
+
   async post(input: {
     conversationId: string;
     senderId: string;
+    /** devices.id and Signal number of the sending device. */
     senderDeviceId: string;
+    senderDevice: number;
     id: string;
-    body: string;
-    replyToId?: string | null;
+    kind: 'text' | 'attachment' | 'reaction';
+    envelopes: OutgoingEnvelope[];
     attachmentId?: string | null;
+    targetId?: string | null;
   }): Promise<RoomResult<Message>> {
     if (!(await this.member(input.conversationId, input.senderId))) {
       return fail('not_found', 'Conversation not found');
     }
     const db = this.env.DB;
+    const sender = { userId: input.senderId, device: input.senderDevice };
 
     // Idempotent retries: the client's message id is the key.
     const existing = await db
@@ -122,33 +160,52 @@ export class ConversationRoom extends DurableObject<Env> {
         existing.sender_id !== input.senderId
       )
         return fail('conflict', 'Message id already used');
-      return { ok: true, value: (await loadMessage(db, input.conversationId, input.id))! };
+      return { ok: true, value: (await loadMessage(db, input.conversationId, input.id, sender))! };
     }
-    if (input.replyToId) {
+    if (input.targetId) {
       const target = await db
-        .prepare('SELECT 1 FROM messages WHERE id = ? AND conversation_id = ?')
-        .bind(input.replyToId, input.conversationId)
-        .first();
-      if (!target) return fail('bad_request', 'Replied-to message not found');
+        .prepare('SELECT kind, deleted_at FROM messages WHERE id = ? AND conversation_id = ?')
+        .bind(input.targetId, input.conversationId)
+        .first<{ kind: Message['kind']; deleted_at: number | null }>();
+      if (!target) return fail('bad_request', 'Message not found');
+      if (target.deleted_at !== null || target.kind === 'system' || target.kind === 'reaction')
+        return fail('bad_request', 'This message can’t be reacted to');
     }
     if (input.attachmentId) {
-      // Only my own upload, to this conversation, finished and not sent before.
+      // Only my own encrypted upload, to this conversation, finished and not sent before.
       const a = await db
         .prepare(
-          'SELECT uploaded_at, message_id FROM attachments WHERE id = ? AND conversation_id = ? AND uploader_id = ?',
+          'SELECT kind, uploaded_at, message_id FROM attachments WHERE id = ? AND conversation_id = ? AND uploader_id = ?',
         )
         .bind(input.attachmentId, input.conversationId, input.senderId)
-        .first<{ uploaded_at: number | null; message_id: string | null }>();
-      if (!a) return fail('bad_request', 'Attachment not found');
+        .first<{ kind: string; uploaded_at: number | null; message_id: string | null }>();
+      if (!a || a.kind !== 'encrypted') return fail('bad_request', 'Attachment not found');
       if (a.uploaded_at === null)
         return fail('bad_request', 'Attachment hasn’t finished uploading');
       if (a.message_id !== null) return fail('conflict', 'Attachment was already sent');
     }
 
+    // Exactly one envelope per current device of every member, except this one.
+    const expected = (await keyedDevices(db, [...this.members.keys()])).filter(
+      (d) => !(d.userId === input.senderId && d.deviceId === input.senderDevice),
+    );
+    const mismatch = coverage(expected, input.envelopes);
+    if (mismatch) return fail('conflict', 'The recipients’ devices have changed', mismatch);
+
     const seq = ++this.lastSeq;
     const rev = this.nextRev();
     const now = Date.now();
-    const kind = input.attachmentId ? 'attachment' : 'text';
+    const envelopeInserts: D1PreparedStatement[] = [];
+    for (let i = 0; i < input.envelopes.length; i += ENVELOPES_PER_INSERT) {
+      const chunk = input.envelopes.slice(i, i + ENVELOPES_PER_INSERT);
+      envelopeInserts.push(
+        db
+          .prepare(
+            `INSERT INTO message_envelopes (message_id, user_id, device, type, body) VALUES ${chunk.map(() => '(?, ?, ?, ?, ?)').join(', ')}`,
+          )
+          .bind(...chunk.flatMap((e) => [input.id, e.userId, e.deviceId, e.type, e.body])),
+      );
+    }
     try {
       const results = await db.batch([
         input.attachmentId
@@ -158,8 +215,8 @@ export class ConversationRoom extends DurableObject<Env> {
           : db.prepare('SELECT 1'),
         db
           .prepare(
-            `INSERT INTO messages (id, conversation_id, seq, rev, sender_id, sender_device_id, kind, body, reply_to_id, attachment_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO messages (id, conversation_id, seq, rev, sender_id, sender_device_id, sender_device, kind, encryption, body, attachment_id, target_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'signal', '', ?, ?, ?)`,
           )
           .bind(
             input.id,
@@ -168,13 +225,19 @@ export class ConversationRoom extends DurableObject<Env> {
             rev,
             input.senderId,
             input.senderDeviceId,
-            kind,
-            input.body,
-            input.replyToId ?? null,
+            input.senderDevice,
+            input.kind,
             input.attachmentId ?? null,
+            input.targetId ?? null,
             now,
           ),
-        this.bumpConversation(seq, rev, now),
+        ...envelopeInserts,
+        // Reactions don't count as conversation activity.
+        input.kind === 'reaction'
+          ? this.env.DB.prepare(
+              'UPDATE conversations SET last_seq = MAX(last_seq, ?), last_rev = MAX(last_rev, ?) WHERE id = ?',
+            ).bind(seq, rev, this.conversationId)
+          : this.bumpConversation(seq, rev, now),
         // The sender has obviously seen their own message.
         db
           .prepare(
@@ -191,103 +254,88 @@ export class ConversationRoom extends DurableObject<Env> {
       }
     } catch (e) {
       // Lost a race with a duplicate send of the same id: return the stored copy.
-      const dup = await loadMessage(db, input.conversationId, input.id);
+      const dup = await loadMessage(db, input.conversationId, input.id, sender);
       if (dup && dup.senderId === input.senderId) return { ok: true, value: dup };
       throw e;
     }
 
-    const message = (await loadMessage(db, input.conversationId, input.id))!;
-    this.broadcast(this.members.keys(), { type: 'message', message });
-    const recipients = [...this.members.keys()].filter((u) => u !== input.senderId);
-    this.ctx.waitUntil(
-      pushMessage(this.env, message, this.info, recipients).catch((e: unknown) =>
-        console.error(JSON.stringify({ type: 'push_error', message: String(e) })),
-      ),
-    );
-    return { ok: true, value: message };
-  }
-
-  private async editable(conversationId: string, messageId: string) {
-    return this.env.DB.prepare(`${MESSAGE_SELECT} WHERE m.id = ? AND m.conversation_id = ?`)
-      .bind(messageId, conversationId)
-      .first<MessageRow>();
-  }
-
-  /** Set (or with `emoji: null` remove) my reaction. One per person per message. */
-  async react(input: {
-    conversationId: string;
-    userId: string;
-    messageId: string;
-    emoji: string | null;
-  }): Promise<RoomResult<Message>> {
-    if (!(await this.member(input.conversationId, input.userId)))
-      return fail('not_found', 'Conversation not found');
-    const row = await this.editable(input.conversationId, input.messageId);
-    if (!row) return fail('not_found', 'Message not found');
-    if (row.deleted_at !== null || row.kind === 'system')
-      return fail('bad_request', 'This message can’t be reacted to');
-
-    const db = this.env.DB;
-    const rev = this.nextRev();
-    await db.batch([
-      input.emoji
-        ? db
-            .prepare(
-              'INSERT OR REPLACE INTO reactions (message_id, user_id, emoji, created_at) VALUES (?, ?, ?, ?)',
-            )
-            .bind(input.messageId, input.userId, input.emoji, Date.now())
-        : db
-            .prepare('DELETE FROM reactions WHERE message_id = ? AND user_id = ?')
-            .bind(input.messageId, input.userId),
-      db.prepare('UPDATE messages SET rev = ? WHERE id = ?').bind(rev, input.messageId),
-      this.bumpConversation(null, rev, 0),
-    ]);
-    const message = (await hydrate(db, [{ ...row, rev }]))[0]!;
-    this.broadcast(this.members.keys(), { type: 'message', message });
+    const row = (await loadRow(db, input.conversationId, input.id))!;
+    this.ctx.waitUntil(this.publish(row));
+    const message = toMessage(row);
+    if (input.kind !== 'reaction') {
+      const recipients = [...this.members.keys()].filter((u) => u !== input.senderId);
+      this.ctx.waitUntil(
+        pushMessage(this.env, message, this.info, recipients).catch((e: unknown) =>
+          console.error(JSON.stringify({ type: 'push_error', message: String(e) })),
+        ),
+      );
+    }
     return { ok: true, value: message };
   }
 
   /**
-   * Delete for everyone: the sender, or a group admin. The text, file and
-   * reactions are erased; the message stays as a "deleted" marker.
+   * Delete for everyone: the sender, or a group admin. Ciphertexts, the file
+   * and reactions to it are erased; the message stays as a "deleted" marker.
    */
   async remove(input: {
     conversationId: string;
     userId: string;
+    deviceId: string;
     messageId: string;
   }): Promise<RoomResult<Message>> {
     if (!(await this.member(input.conversationId, input.userId)))
       return fail('not_found', 'Conversation not found');
-    const row = await this.editable(input.conversationId, input.messageId);
+    const db = this.env.DB;
+    const row = await loadRow(db, input.conversationId, input.messageId);
     if (!row) return fail('not_found', 'Message not found');
-    if (row.kind === 'system') return fail('bad_request', 'This message can’t be deleted');
+    if (row.kind === 'system' || row.kind === 'reaction')
+      return fail('bad_request', 'This message can’t be deleted');
     const isAdmin = this.info.kind === 'group' && this.members.get(input.userId) === 'admin';
     if (row.sender_id !== input.userId && !isAdmin)
       return fail('forbidden', 'You can only delete your own messages');
-    if (row.deleted_at !== null)
-      return { ok: true, value: (await hydrate(this.env.DB, [row]))[0]! };
+    if (row.deleted_at !== null) return { ok: true, value: toMessage(row) };
 
-    const db = this.env.DB;
     const rev = this.nextRev();
     const now = Date.now();
+    const reactions = `SELECT id FROM messages WHERE target_id = ?1 AND kind = 'reaction'`;
     await db.batch([
       db
         .prepare(
-          "UPDATE messages SET deleted_at = ?, body = '', attachment_id = NULL, rev = ? WHERE id = ?",
+          "UPDATE messages SET deleted_at = ?, body = '', reply_to_id = NULL, attachment_id = NULL, rev = ? WHERE id = ?",
         )
         .bind(now, rev, input.messageId),
-      db.prepare('DELETE FROM reactions WHERE message_id = ?').bind(input.messageId),
+      db
+        .prepare(
+          `DELETE FROM message_envelopes WHERE message_id = ?1 OR message_id IN (${reactions})`,
+        )
+        .bind(input.messageId),
+      db
+        .prepare(
+          `UPDATE messages SET deleted_at = ?2, rev = ?3 WHERE id IN (${reactions}) AND deleted_at IS NULL`,
+        )
+        .bind(input.messageId, now, rev),
       db.prepare('DELETE FROM attachments WHERE message_id = ?').bind(input.messageId),
       this.bumpConversation(null, rev, 0),
+      // Moderation is logged (who, which conversation); never the content.
+      ...(row.sender_id !== input.userId
+        ? [
+            auditStatement(
+              db,
+              'message_deleted',
+              { userId: input.userId, deviceId: input.deviceId },
+              { conversationId: input.conversationId, senderId: row.sender_id },
+            ),
+          ]
+        : []),
     ]);
     if (row.attachment_id) {
       this.ctx.waitUntil(
         this.env.MEDIA.delete(attachmentKeys(input.conversationId, row.attachment_id)),
       );
     }
-    const message = (await loadMessage(db, input.conversationId, input.messageId))!;
-    this.broadcast(this.members.keys(), { type: 'message', message });
-    return { ok: true, value: message };
+    const deleted = (await loadRow(db, input.conversationId, input.messageId))!;
+    this.ctx.waitUntil(this.publish(deleted));
+    return { ok: true, value: toMessage(deleted) };
   }
 
   // ——— Receipts and typing ———
@@ -364,6 +412,17 @@ export class ConversationRoom extends DurableObject<Env> {
     const now = Date.now();
     await db.batch([
       ...statements,
+      // Group changes are security-relevant (who can read new messages).
+      auditStatement(
+        db,
+        'group_changed',
+        { userId: event.actorId },
+        {
+          conversationId: this.conversationId!,
+          action: event.action,
+          targets: event.targetIds.length,
+        },
+      ),
       db
         .prepare(
           `INSERT INTO messages (id, conversation_id, seq, rev, sender_id, kind, body, system, created_at)
@@ -372,7 +431,8 @@ export class ConversationRoom extends DurableObject<Env> {
         .bind(id, this.conversationId, seq, rev, event.actorId, JSON.stringify(event), now),
       this.bumpConversation(seq, rev, now),
     ]);
-    const message = (await loadMessage(db, this.conversationId!, id))!;
+    const row = (await loadRow(db, this.conversationId!, id))!;
+    const message = toMessage(row);
     const everyone = [...new Set([...this.members.keys(), ...notifyAlso])];
     this.broadcast(this.members.keys(), { type: 'message', message });
     this.broadcast(everyone, { type: 'conversation', conversationId: this.conversationId! });

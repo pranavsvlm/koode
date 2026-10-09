@@ -8,6 +8,8 @@ nodeLinker: hoisted
 
 # pnpm blocks dependency install scripts by default; allow only the ones we need.
 allowBuilds:
+  # Ships prebuilt; its install script only prints a message.
+  '@signalapp/libsignal-client': false
   esbuild: true
   unrs-resolver: true
   workerd: true

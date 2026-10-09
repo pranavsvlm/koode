@@ -170,6 +170,17 @@ export default function CallScreen() {
                 />
               </Pressable>
             </View>
+            {m.encrypted && (m.phase === 'connected' || m.phase === 'reconnecting') && (
+              <View
+                className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1"
+                accessibilityLabel="End-to-end encrypted"
+              >
+                <Icon name="lock" size={12} color={callColors.textSecondary} />
+                <Text variant="caption" style={{ color: callColors.textSecondary }}>
+                  End-to-end encrypted
+                </Text>
+              </View>
+            )}
             {m.cameraUnavailable && (
               <View className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1">
                 <Icon name="video-off" size={13} color={callColors.textSecondary} />

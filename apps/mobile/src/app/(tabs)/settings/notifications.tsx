@@ -65,16 +65,9 @@ export default function NotificationsScreen() {
 
       <ListSection
         title="Privacy"
-        footer="When off, notifications only say “New message”. Your phone’s lock-screen settings decide what shows while it’s locked. Until end-to-end encryption arrives, notification text passes through Apple’s or Google’s push service."
+        footer="Messages are end-to-end encrypted, so Koode’s server can’t read them and notifications only say who wrote: never what they said. Nothing readable passes through Apple’s or Google’s push service."
       >
-        <ListRow
-          title="Show Message Text"
-          accessory={{
-            type: 'switch',
-            value: p.notificationPreview !== 'never',
-            onValueChange: (v) => p.set('notificationPreview', v ? 'always' : 'never'),
-          }}
-        />
+        <ListRow icon="lock" title="Notifications show the sender only" />
       </ListSection>
 
       <ListSection

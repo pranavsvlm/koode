@@ -1,4 +1,4 @@
-import { AudioSession } from '@livekit/react-native';
+import { AudioSession, RNE2EEManager, RNKeyProvider } from '@livekit/react-native';
 import {
   ConnectionQuality,
   Room,
@@ -20,11 +20,14 @@ export type MediaEvents = {
   quality: (quality: MediaQuality) => void;
   /** Video tracks changed (render with `localVideo()` / `remoteVideo()`). */
   video: () => void;
+  /** Whether the other person's media is arriving end-to-end encrypted. */
+  encryption: (encrypted: boolean) => void;
 };
 
 /** Media transport for a call. LiveKit in the app; a fake in tests. */
 export interface MediaSession {
-  connect(url: string, token: string, opts: { camera: boolean }): Promise<void>;
+  /** `key`: the call's media key (base64, 32 bytes); frames are encrypted with it. */
+  connect(url: string, token: string, opts: { camera: boolean; key: string }): Promise<void>;
   disconnect(): Promise<void>;
   setMicrophone(enabled: boolean): Promise<void>;
   /** Resolves false if the camera is unavailable (e.g. the iOS Simulator). */
@@ -34,23 +37,47 @@ export interface MediaSession {
   on<E extends keyof MediaEvents>(event: E, listener: MediaEvents[E]): () => void;
   localVideo(): LocalVideoTrack | undefined;
   remoteVideo(): RemoteVideoTrack | undefined;
+  /**
+   * Diagnostics: decoded audio received so far. Frames that fail to decrypt
+   * are dropped before decoding, so energy > 0 means decryption works.
+   */
+  audioStats?(): Promise<{ energy: number; packets: number } | null>;
 }
 
 const toQuality = (q: ConnectionQuality): MediaQuality =>
   q === ConnectionQuality.Poor ? 'poor' : q === ConnectionQuality.Lost ? 'lost' : 'good';
 
-/** LiveKit implementation (WebRTC via @livekit/react-native-webrtc). */
+const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+
+/**
+ * LiveKit implementation (WebRTC via @livekit/react-native-webrtc), with
+ * end-to-end encrypted media: every audio and video frame is encrypted on the
+ * device (AES-GCM, key derived from the call's media key), so the media
+ * server forwards ciphertext only.
+ */
 export function liveKitSession(): MediaSession {
-  const room = new Room({ adaptiveStream: true, dynacast: true });
+  const keyProvider = new RNKeyProvider({ sharedKey: true });
+  const room = new Room({
+    adaptiveStream: true,
+    dynacast: true,
+    e2ee: { e2eeManager: new RNE2EEManager(keyProvider) },
+  });
   const listeners: { [E in keyof MediaEvents]: Set<MediaEvents[E]> } = {
     state: new Set(),
     remote: new Set(),
     quality: new Set(),
     video: new Set(),
+    encryption: new Set(),
   };
   const emit = <E extends keyof MediaEvents>(e: E, ...args: Parameters<MediaEvents[E]>) =>
     listeners[e].forEach((l) => (l as (...a: Parameters<MediaEvents[E]>) => void)(...args));
   const isRemote = (p: Participant) => p.identity !== room.localParticipant.identity;
+  /** Encrypting here, and everything the other side publishes is marked encrypted. */
+  const checkEncryption = () => {
+    const remotes = [...room.remoteParticipants.values()].filter((p) => p.trackPublications.size);
+    if (remotes.length)
+      emit('encryption', room.isE2EEEnabled && remotes.every((p) => p.isEncrypted));
+  };
 
   room
     .on(RoomEvent.Connected, () => emit('state', 'connected'))
@@ -67,11 +94,20 @@ export function liveKitSession(): MediaSession {
     .on(RoomEvent.TrackMuted, () => emit('video'))
     .on(RoomEvent.TrackUnmuted, () => emit('video'))
     .on(RoomEvent.LocalTrackPublished, () => emit('video'))
-    .on(RoomEvent.LocalTrackUnpublished, () => emit('video'));
+    .on(RoomEvent.LocalTrackUnpublished, () => emit('video'))
+    .on(RoomEvent.TrackSubscribed, () => checkEncryption())
+    .on(RoomEvent.TrackPublished, () => checkEncryption())
+    .on(RoomEvent.EncryptionError, (error) => {
+      if (__DEV__) console.warn(`[call] encryption error: ${error.message}`);
+      emit('encryption', false);
+    });
 
   return {
-    async connect(url, token, { camera }) {
+    async connect(url, token, { camera, key }) {
       emit('state', 'connecting');
+      // Encryption is on before anything is published; there's no unencrypted fallback.
+      await keyProvider.setSharedKey(bytes(key));
+      await room.setE2EEEnabled(true);
       await AudioSession.startAudioSession();
       await room.connect(url, token);
       if (room.remoteParticipants.size > 0) emit('remote', true);
@@ -81,6 +117,7 @@ export function liveKitSession(): MediaSession {
     async disconnect() {
       await room.disconnect();
       await AudioSession.stopAudioSession();
+      keyProvider.dispose();
     },
     async setMicrophone(enabled) {
       await room.localParticipant.setMicrophoneEnabled(enabled);
@@ -115,6 +152,26 @@ export function liveKitSession(): MediaSession {
     localVideo() {
       const pub = room.localParticipant.getTrackPublication(Track.Source.Camera);
       return pub && !pub.isMuted ? (pub.videoTrack as LocalVideoTrack | undefined) : undefined;
+    },
+    async audioStats() {
+      for (const p of room.remoteParticipants.values()) {
+        const track = p.getTrackPublication(Track.Source.Microphone)?.audioTrack;
+        const report = await track?.getRTCStatsReport();
+        let found: { energy: number; packets: number } | null = null;
+        report?.forEach(
+          (s: {
+            type?: string;
+            kind?: string;
+            totalAudioEnergy?: number;
+            packetsReceived?: number;
+          }) => {
+            if (s.type === 'inbound-rtp' && s.kind === 'audio')
+              found = { energy: s.totalAudioEnergy ?? 0, packets: s.packetsReceived ?? 0 };
+          },
+        );
+        if (found) return found;
+      }
+      return null;
     },
     remoteVideo() {
       for (const p of room.remoteParticipants.values()) {

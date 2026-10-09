@@ -7,12 +7,14 @@ export type ApiClientErrorCode = ApiErrorCode | 'network' | 'timeout' | 'invalid
 export class ApiClientError extends Error {
   readonly code: ApiClientErrorCode;
   readonly status: number | undefined;
+  readonly details: unknown;
 
-  constructor(code: ApiClientErrorCode, message: string, status?: number) {
+  constructor(code: ApiClientErrorCode, message: string, status?: number, details?: unknown) {
     super(message);
     this.name = 'ApiClientError';
     this.code = code;
     this.status = status;
+    this.details = details;
   }
 }
 
@@ -80,7 +82,12 @@ export async function apiRequest<T>(
   if (!res.ok) {
     const parsed = ApiErrorBody.safeParse(json);
     if (parsed.success) {
-      throw new ApiClientError(parsed.data.error.code, parsed.data.error.message, res.status);
+      throw new ApiClientError(
+        parsed.data.error.code,
+        parsed.data.error.message,
+        res.status,
+        parsed.data.error.details,
+      );
     }
     throw new ApiClientError('invalid_response', `Unexpected ${res.status} response`, res.status);
   }
