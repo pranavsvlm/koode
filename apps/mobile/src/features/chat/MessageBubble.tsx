@@ -60,6 +60,8 @@ export type MessageBubbleProps = {
   onOpenMedia: (message: Message) => void;
   onToggleReaction: (message: Message, emoji: string) => void;
   onOpenDocument: (message: Message) => void;
+  /** Tap a failed message to send it again. */
+  onRetry?: (message: Message) => void;
 };
 
 export const MessageBubble = memo(function MessageBubble({
@@ -78,6 +80,7 @@ export const MessageBubble = memo(function MessageBubble({
   onOpenMedia,
   onToggleReaction,
   onOpenDocument,
+  onRetry,
 }: MessageBubbleProps) {
   const colors = useThemeColors();
   const { width: windowWidth } = useWindowDimensions();
@@ -132,11 +135,13 @@ export const MessageBubble = memo(function MessageBubble({
         onLongPress(message);
       }}
       onPress={
-        isVisual
-          ? () => onOpenMedia(message)
-          : attachment?.kind === 'document'
-            ? () => onOpenDocument(message)
-            : undefined
+        message.status === 'failed' && outgoing && onRetry
+          ? () => onRetry(message)
+          : isVisual
+            ? () => onOpenMedia(message)
+            : attachment?.kind === 'document'
+              ? () => onOpenDocument(message)
+              : undefined
       }
       delayLongPress={280}
       accessible

@@ -3,7 +3,8 @@ import { useMemo, useState } from 'react';
 import { FlatList, Pressable, ScrollView, View } from 'react-native';
 import Animated, { FadeIn, FadeOut, LinearTransition } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Avatar, Button, EmptyState, Icon, Text, TextField } from '@/components/ui';
+import { Avatar, Button, EmptyState, Icon, Text, TextField, useToast } from '@/components/ui';
+import { authErrorMessage } from '@/features/auth/errors';
 import type { Contact } from '@/domain/types';
 import { haptics } from '@/lib/haptics';
 import { cn } from '@/lib/cn';
@@ -16,7 +17,8 @@ export default function NewChatScreen() {
   const { mode } = useLocalSearchParams<{ mode?: 'call' }>();
   const callMode = mode === 'call';
   const contacts = useChat((s) => s.contacts);
-  const createConversation = useChat((s) => s.createConversation);
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [group, setGroup] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
@@ -36,21 +38,32 @@ export default function NewChatScreen() {
       return;
     }
     if (!group) {
-      const id = createConversation([c.id]);
-      router.dismiss();
-      router.push(`/chat/${id}`);
+      void start([c.id]);
       return;
     }
     haptics.selection();
     setSelected((s) => (s.includes(c.id) ? s.filter((x) => x !== c.id) : [...s, c.id]));
   };
 
-  const createGroup = () => {
-    const id = createConversation(selected, groupName.trim());
-    haptics.success();
-    router.dismiss();
-    router.push(`/chat/${id}`);
+  const start = async (memberIds: string[], title?: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const id = await useChat.getState().createConversation(memberIds, title);
+      if (title) haptics.success();
+      router.dismiss();
+      router.push(`/chat/${id}`);
+    } catch (e) {
+      toast.show({
+        title: 'Couldn’t start the conversation',
+        message: authErrorMessage(e),
+        tone: 'error',
+      });
+    } finally {
+      setBusy(false);
+    }
   };
+  const createGroup = () => void start(selected, groupName.trim());
 
   const title = callMode
     ? 'New Call'
@@ -128,6 +141,7 @@ export default function NewChatScreen() {
           <View className="flex-1" />
           <Button
             label="Create Group"
+            loading={busy}
             disabled={!groupName.trim()}
             onPress={createGroup}
             fullWidth

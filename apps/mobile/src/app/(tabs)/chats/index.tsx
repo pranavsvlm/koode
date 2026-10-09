@@ -15,6 +15,8 @@ export default function ChatsScreen() {
   const conversations = useChat((s) => s.conversations);
   const messages = useChat((s) => s.messages);
   const contacts = useChat((s) => s.contacts);
+  const connection = useChat((s) => s.connection);
+  const mode = useChat((s) => s.mode);
   const [query, setQuery] = useState('');
 
   const summaries = useMemo(
@@ -43,6 +45,13 @@ export default function ChatsScreen() {
     <>
       <Stack.Screen
         options={{
+          // Telegram-style status in the title while not connected.
+          title:
+            mode === 'sample' || connection === 'online'
+              ? 'Chats'
+              : connection === 'connecting'
+                ? 'Connecting…'
+                : 'Waiting for network…',
           headerSearchBarOptions: {
             placeholder: 'Search',
             hideWhenScrolling: true,

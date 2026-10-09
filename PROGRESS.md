@@ -5,8 +5,8 @@
 | 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2) |
 | 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator          |
 | 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator          |
-| 4     | Real-time messaging      | ⏳ Awaiting approval                                   |
-| 5     | Voice and video calling  | —                                                      |
+| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator    |
+| 5     | Voice and video calling  | ⏳ Awaiting approval                                   |
 | 6     | Notifications            | —                                                      |
 | 7     | Media and group features | —                                                      |
 | 8     | Security and E2EE        | —                                                      |
@@ -14,6 +14,87 @@
 | 10    | Builds and distribution  | —                                                      |
 
 **E2EE status: not implemented.** Traffic is protected by TLS only.
+
+---
+
+## Phase 4: Real-time messaging (2026-10-09)
+
+Chats are **real**: messages go through the local Worker, D1 and Durable Objects, and
+are cached on the phone. Calls and the call history are still simulated (Phase 5).
+Reactions, deletion, pin and mute are still device-only (Phase 7).
+**Message contents are not end-to-end encrypted yet (Phase 8).**
+
+### Delivered
+
+- **Server:**
+  - Migration `0003` (conversations, members with delivered/read/shared-read
+    positions, messages).
+  - `ConversationRoom` DO: single writer for `seq`, idempotent sends, reply
+    validation, receipt handling, typing relay, fan-out.
+  - `UserSocket` DO: hibernating WebSockets for every device, auto-answered
+    heartbeats, closes the socket when a device signs out or is removed.
+  - Routes: user directory, conversations (direct dedupe, groups), history paging
+    (`before` / `after`), send, receipts, and an authenticated WebSocket upgrade (header
+    auth, no URL tokens).
+- **Shared:** message, conversation and receipt schemas, plus the realtime protocol.
+- **App:**
+  - `MessagingEngine`: SQLite cache, offline outbox with in-order delivery and
+    retry-on-tap.
+  - Reconnection with backoff and jitter, heartbeat dead-connection detection,
+    resume on foreground.
+  - Catch-up sync, history paging, batched receipts, throttled and expiring typing.
+  - The chat store maps engine data into the existing UI. Ticks come from members'
+    receipt positions, with read-receipt privacy and reciprocity.
+  - The Chats title shows "Connecting…" / "Waiting for network…".
+  - Header subtitle shows `@username` (no fake presence).
+  - Sample data moves behind a Developer switch.
+- **Dev tooling:** `scripts/peer.mjs` (a second account in Node) and a messaging mode
+  for the screen tour.
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                     | Result                  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| TypeScript, ESLint, Prettier (all packages)                                                                                                                                                                                                                               | ✅ Pass                 |
+| Shared schema tests                                                                                                                                                                                                                                                       | ✅ 31/31                |
+| Server tests in the Workers runtime                                                                                                                                                                                                                                       | ✅ 48/48                |
+| Server messaging coverage: direct-chat dedupe, groups, ordering, idempotency, id hijack (409), non-member access (404), replies, body limits, paging both ways, unread counts, receipt monotonicity, read-receipt privacy                                                 | ✅                      |
+| Server WebSocket coverage: unauthenticated upgrades rejected, live delivery to all devices, receipts, typing to others only, heartbeat, malformed frames ignored, socket closed on sign-out                                                                               | ✅                      |
+| Mobile tests (incl. 17 engine tests with fake clock/socket/server: outbox ordering offline, failed+retry, backoff 1→30 s cap and reset, heartbeat timeout, catch-up `after=`, paging, typing TTL/throttle, receipts batching and privacy, cache restore, signed-out stop) | ✅ 126/126              |
+| **Two accounts on the iOS 27 Simulator + a Node peer, against the local server**                                                                                                                                                                                          | ✅                      |
+| Peer's chat arrived live with an unread badge; the app's reply reached the peer (seq 2); the peer's read receipt turned the app's ticks to read; the peer's typing showed live; the peer's reply arrived live                                                             | ✅ Screenshots and logs |
+| Offline: server stopped, app relaunched, chats load from the SQLite cache with "Waiting for network…"; server restarted, app reconnected by itself                                                                                                                        | ✅                      |
+
+Bugs found by these tests and fixed:
+
+- An outbox flush could leave a stale promise, so messages waited until the next
+  reconnect.
+- Overlapping SQLite transactions failed ("transaction within a transaction"); cache
+  operations are now serialized.
+- A cache failure no longer stops messaging.
+
+### Not verified
+
+- **Typing and tapping by hand:** the on-device steps were scripted (the store's
+  `send`), not typed on the keyboard. Retry-on-tap, scrolling to load older history
+  and the outbox were exercised in tests, not by hand.
+- **Real network switches** (Wi-Fi ↔ cellular) and long backgrounding: covered by
+  heartbeat and resume logic plus tests, not by a real handover.
+- **Two real phones, Android, and a deployed server.**
+- **Large histories** and performance (Phase 9). Start-up loads at most 300 cached
+  messages per chat.
+
+### Known issues and limitations
+
+- Not end-to-end encrypted: the server and the local cache hold plaintext.
+- No presence or "last seen" yet. The header shows `@username`.
+- Local rate limits are shared by all local clients (see SETUP → Troubleshooting).
+- The sample-data switch clears the local message cache; it re-syncs from the server.
+
+### Manual configuration required
+
+None beyond Phase 3. Applying migration 0003 locally (`db:migrate:local`) and
+restarting `wrangler dev` (for the new Durable Object) are done on this Mac.
 
 ---
 

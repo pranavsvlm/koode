@@ -112,3 +112,61 @@ export async function login(deviceId: string, device: TestDevice) {
     },
   });
 }
+
+/** Two signed-up users (Maya invited by bootstrap, Dan invited by Maya). */
+export async function twoUsers() {
+  const maya = await registerUser();
+  const invite = await api('/invites', { body: {}, token: maya.session.accessToken });
+  const dan = await registerUser({
+    inviteCode: invite.json.code,
+    username: 'dan',
+    displayName: 'Dan Okafor',
+  });
+  return { maya: maya.session, dan: dan.session, mayaDevice: maya.device, danDevice: dan.device };
+}
+
+export function uuid() {
+  return crypto.randomUUID();
+}
+
+/** Open an authenticated realtime socket and collect its events. */
+export async function openSocket(token?: string) {
+  const res = await SELF.fetch('https://api.test/v1/realtime', {
+    headers: { upgrade: 'websocket', ...(token && { authorization: `Bearer ${token}` }) },
+  });
+  const ws = res.webSocket;
+  if (!ws)
+    return {
+      status: res.status,
+      ws: null,
+      events: [],
+      next: async () => null,
+      closed: () => null,
+    } as const;
+  ws.accept();
+  const events: { type: string; [k: string]: unknown }[] = [];
+  const waiters: (() => void)[] = [];
+  let closed: { code: number } | null = null;
+  ws.addEventListener('message', (e) => {
+    events.push(JSON.parse(e.data as string));
+    waiters.splice(0).forEach((w) => w());
+  });
+  ws.addEventListener('close', (e) => {
+    closed = { code: e.code };
+    waiters.splice(0).forEach((w) => w());
+  });
+  /** Wait for the first not-yet-consumed event of `type`. */
+  const next = async (type: string, timeoutMs = 2000) => {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const i = events.findIndex((e) => e.type === type);
+      if (i >= 0) return events.splice(i, 1)[0]!;
+      if (Date.now() > deadline) return null;
+      await new Promise<void>((r) => {
+        waiters.push(r);
+        setTimeout(r, 50);
+      });
+    }
+  };
+  return { status: res.status, ws, events, next, closed: () => closed } as const;
+}

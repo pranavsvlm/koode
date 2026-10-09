@@ -1,6 +1,6 @@
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, View } from 'react-native';
+import { ActivityIndicator, FlatList, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import { Avatar, Button, EmptyState, IconButton, Text, useToast } from '@/components/ui';
 import { ME, type Message } from '@/domain/types';
@@ -25,6 +25,7 @@ export default function ConversationScreen() {
   const conversation = useChat((s) => s.conversations[id]);
   const messages = useChat((s) => s.messages[id] ?? EMPTY);
   const contacts = useChat((s) => s.contacts);
+  const hasMore = useChat((s) => s.hasMore[id] ?? false);
   const { send, toggleReaction, deleteMessage, markRead } = useChat.getState();
   const textSize = usePreferences((s) => s.chatTextSize);
   const showTyping = usePreferences((s) => s.typingIndicators);
@@ -60,6 +61,7 @@ export default function ConversationScreen() {
     () => toast.show({ title: 'Downloads arrive with media support (Phase 7)' }),
     [toast],
   );
+  const onRetry = useCallback((m: Message) => useChat.getState().retry(m.id), []);
 
   const renderItem = useCallback(
     ({ item }: { item: ChatItem }) => {
@@ -83,10 +85,22 @@ export default function ConversationScreen() {
           onOpenMedia={onOpenMedia}
           onToggleReaction={onReact}
           onOpenDocument={onOpenDocument}
+          onRetry={onRetry}
         />
       );
     },
-    [byId, contacts, isGroup, nameOf, textSize, openedAt, onOpenMedia, onReact, onOpenDocument],
+    [
+      byId,
+      contacts,
+      isGroup,
+      nameOf,
+      textSize,
+      openedAt,
+      onOpenMedia,
+      onReact,
+      onOpenDocument,
+      onRetry,
+    ],
   );
 
   if (!conversation) {
@@ -181,6 +195,16 @@ export default function ConversationScreen() {
             initialNumToRender={20}
             maxToRenderPerBatch={12}
             windowSize={11}
+            onEndReached={() => {
+              if (hasMore) void useChat.getState().loadOlder(id);
+            }}
+            onEndReachedThreshold={0.4}
+            // Inverted list: the footer sits above the oldest message.
+            ListFooterComponent={
+              hasMore ? (
+                <ActivityIndicator className="py-4" color={colors['text-tertiary']} />
+              ) : null
+            }
             ListHeaderComponent={
               typingId ? (
                 <TypingIndicator name={isGroup ? contacts[typingId]?.displayName : undefined} />
@@ -197,6 +221,7 @@ export default function ConversationScreen() {
             send(id, { text, replyToId: replyTo?.id });
             setReplyTo(undefined);
           }}
+          onTyping={() => useChat.getState().typing(id)}
           onAttach={() => router.push({ pathname: '/attach', params: { conversationId: id } })}
           onVoice={() =>
             toast.show({ title: 'Voice messages arrive with media support (Phase 7)' })

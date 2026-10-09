@@ -32,7 +32,13 @@
   ],
 
   "durable_objects": {
-    "bindings": [{ "name": "CONVERSATION_ROOM", "class_name": "ConversationRoom" }],
+    "bindings": [
+      { "name": "CONVERSATION_ROOM", "class_name": "ConversationRoom" },
+      { "name": "USER_SOCKET", "class_name": "UserSocket" },
+    ],
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ConversationRoom"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ConversationRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserSocket"] },
+  ],
 }

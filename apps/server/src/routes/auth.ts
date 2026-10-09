@@ -270,5 +270,8 @@ export const auth = new Hono<AppEnv>()
         .bind(now, deviceId),
       auditStatement(db, 'logout', { userId, deviceId }),
     ]);
+    c.executionCtx.waitUntil(
+      c.env.USER_SOCKET.get(c.env.USER_SOCKET.idFromName(userId)).disconnectDevice(deviceId),
+    );
     return c.json<OkResponse>({ ok: true });
   });

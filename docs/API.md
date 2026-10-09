@@ -47,6 +47,38 @@ The signed message is
 | GET    | `/v1/invites`               | 🔒   | Your open invites (codes are not retrievable)                            |
 | DELETE | `/v1/invites/:id`           | 🔒   | Cancel an invite                                                         |
 
+## Messaging
+
+| Method | Path                             | Auth | Purpose                                                                                                         |
+| ------ | -------------------------------- | ---- | --------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/users`                      | 🔒   | Directory of other active members: `{id, username, displayName, about}`                                         |
+| GET    | `/v1/conversations`              | 🔒   | Your conversations: members, receipt positions, last message, unread count                                      |
+| POST   | `/v1/conversations`              | 🔒   | `{kind: 'direct', userId}` (returns the existing chat if there is one) or `{kind: 'group', title, memberIds}`   |
+| GET    | `/v1/conversations/:id`          | 🔒   | One conversation (404 if you're not a member)                                                                   |
+| GET    | `/v1/conversations/:id/messages` | 🔒   | `?before=<seq>` (default: newest) or `?after=<seq>`, plus `limit` (≤100) → `{messages (oldest first), hasMore}` |
+| POST   | `/v1/conversations/:id/messages` | 🔒   | `{id: <uuid v4>, body (≤4000), replyToId?}` → message with `seq` (201). Idempotent per id.                      |
+| POST   | `/v1/conversations/:id/receipts` | 🔒   | `{delivered?, read?, shareRead = true}`                                                                         |
+| GET    | `/v1/realtime`                   | 🔒   | WebSocket upgrade (the bearer token goes in the `Authorization` header)                                         |
+
+### Realtime protocol (JSON text frames)
+
+**Server → client:**
+
+- `{type:'ready'}`
+- `{type:'pong'}`
+- `{type:'message', message}`
+- `{type:'receipt', conversationId, userId, deliveredSeq, readSeq}`
+- `{type:'typing', conversationId, userId}`
+- `{type:'conversation', conversationId}`: re-fetch that conversation.
+
+**Client → server:**
+
+- `{"type":"ping"}`: send exactly this string; it's answered without waking the
+  Durable Object.
+- `{type:'typing', conversationId}`
+
+Close code `4001` means this device was signed out or removed.
+
 ## Rate limits (per client IP unless noted)
 
 | Rule           | Limit                                      |

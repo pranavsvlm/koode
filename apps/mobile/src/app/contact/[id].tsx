@@ -13,6 +13,7 @@ import {
   useToast,
   type IconName,
 } from '@/components/ui';
+import { openConversation } from '@/features/chat/openConversation';
 import { formatLastSeen } from '@/lib/format';
 import { detailOptions } from '@/navigation/options';
 import { useChat } from '@/stores/chat';
@@ -42,7 +43,6 @@ export default function ContactScreen() {
   const contact = useChat((s) => s.contacts[id]);
   const conversations = useChat((s) => s.conversations);
   const messages = useChat((s) => s.messages);
-  const createConversation = useChat((s) => s.createConversation);
 
   const direct = useMemo(
     () => Object.values(conversations).find((c) => c.kind === 'direct' && c.memberIds.includes(id)),
@@ -69,7 +69,12 @@ export default function ContactScreen() {
           {contact.displayName}
         </Text>
         <Text variant="subhead" tone={contact.online ? 'accent' : 'secondary'}>
-          @{contact.username} · {contact.online ? 'online' : formatLastSeen(contact.lastSeenAt)}
+          @{contact.username}
+          {contact.online
+            ? ' · online'
+            : contact.lastSeenAt !== undefined
+              ? ` · ${formatLastSeen(contact.lastSeenAt)}`
+              : ''}
         </Text>
         {contact.about && (
           <Text variant="body" tone="secondary" className="mt-2 text-center">
@@ -82,7 +87,11 @@ export default function ContactScreen() {
         <Action
           icon="message"
           label="Message"
-          onPress={() => router.push(`/chat/${direct?.id ?? createConversation([contact.id])}`)}
+          onPress={() =>
+            openConversation([contact.id]).catch(() =>
+              toast.show({ title: 'Couldn’t open the chat', tone: 'error' }),
+            )
+          }
         />
         <Action
           icon="phone"

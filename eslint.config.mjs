@@ -12,7 +12,16 @@ export default tseslint.config(
   {
     // Node CLI scripts (e.g. apps/server/scripts/create-invite.mjs).
     files: ['**/scripts/**/*.mjs'],
-    languageOptions: { globals: { process: 'readonly', console: 'readonly' } },
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        console: 'readonly',
+        fetch: 'readonly',
+        setTimeout: 'readonly',
+        Buffer: 'readonly',
+        WebSocket: 'readonly',
+      },
+    },
   },
   {
     rules: {

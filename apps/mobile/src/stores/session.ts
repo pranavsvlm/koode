@@ -63,7 +63,7 @@ export const useSession = create<SessionState>()(
 
       signOut: async () => {
         await authClient.logout();
-        useChat.setState({ status: 'idle' });
+        await useChat.getState().unload();
         set({ status: 'signedOut', user: null });
       },
     }),
@@ -78,6 +78,6 @@ export const useSession = create<SessionState>()(
 
 // The device was revoked or its key rejected: drop to the signed-out flow.
 authClient.setOnSignedOut(() => {
-  useChat.setState({ status: 'idle' });
+  void useChat.getState().unload();
   useSession.setState({ status: 'signedOut', user: null });
 });

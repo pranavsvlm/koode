@@ -1,3 +1,4 @@
+import type { ConversationSummary as ServerConversation } from '@koode/shared';
 import { create } from 'zustand';
 import { buildFixtures, CANNED_REPLIES } from '@/dev/fixtures';
 import { useDevSettings } from '@/dev/settings';
@@ -8,37 +9,76 @@ import {
   type Contact,
   type Conversation,
   type Message,
+  type MessageStatus,
+  type Reaction,
 } from '@/domain/types';
+import {
+  clearMessageCache,
+  createMessagingEngine,
+  type LocalMessage,
+  type MessagingEngine,
+  type Snapshot,
+} from '@/features/messaging';
+import { usePreferences } from './preferences';
 
 /**
- * DEVELOPMENT CHAT STORE — in-memory data seeded from fixtures, with simulated
- * delivery, receipts and replies so the UI can be reviewed end to end.
- * Phase 4 replaces this with the WebSocket sync engine and the SQLite cache;
- * screens depend only on the shape of this store.
+ * UI-facing chat state. Two sources:
+ *  - live:   the messaging engine (server + SQLite cache). Default.
+ *  - sample: in-memory fixtures with simulated replies, for design review
+ *            (Settings → Developer → Sample data).
+ * Screens only depend on this store's shape. In live mode my own user id is
+ * mapped to `ME` at this boundary.
+ *
+ * Not yet server-backed (Phase 7): reactions, deleting messages, pin, mute.
  */
 
 export type Draft = { text?: string; attachment?: Attachment; replyToId?: string };
 
+type Overlay = {
+  reactions: Record<string, Reaction[]>;
+  deleted: Record<string, true>;
+  pinned: Record<string, boolean>;
+  muted: Record<string, boolean>;
+};
+
 type ChatState = {
+  mode: 'live' | 'sample';
   status: 'idle' | 'loading' | 'ready';
+  connection: Snapshot['connection'];
   contacts: Record<string, Contact>;
   conversations: Record<string, Conversation>;
   /** Per conversation, oldest → newest. */
   messages: Record<string, Message[]>;
+  hasMore: Record<string, boolean>;
   calls: CallRecord[];
-  load: () => Promise<void>;
+  overlay: Overlay;
+  /** Start for the signed-in user (`me` = their user id). */
+  load: (me?: string) => Promise<void>;
+  /** Stop syncing and erase local message data (sign-out). */
+  unload: () => Promise<void>;
+  /** App came to the foreground / network returned. */
+  resume: () => void;
   send: (conversationId: string, draft: Draft) => void;
+  retry: (messageId: string) => void;
+  loadOlder: (conversationId: string) => Promise<void>;
+  typing: (conversationId: string) => void;
   toggleReaction: (conversationId: string, messageId: string, emoji: string) => void;
   deleteMessage: (conversationId: string, messageId: string) => void;
   markRead: (conversationId: string) => void;
   setPinned: (conversationId: string, pinned: boolean) => void;
   setMuted: (conversationId: string, muted: boolean) => void;
-  createConversation: (memberIds: string[], title?: string) => string;
+  createConversation: (memberIds: string[], title?: string) => Promise<string>;
   addCall: (call: Omit<CallRecord, 'id'>) => void;
 };
 
 let counter = 0;
 const localId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${++counter}`;
+
+let engine: MessagingEngine | null = null;
+let engineMe: string | null = null;
+let unsubscribe: (() => void) | null = null;
+
+const EMPTY_OVERLAY: Overlay = { reactions: {}, deleted: {}, pinned: {}, muted: {} };
 
 function updateMessage(
   messages: Record<string, Message[]>,
@@ -51,102 +91,179 @@ function updateMessage(
   return { ...messages, [conversationId]: list.map((m) => (m.id === messageId ? update(m) : m)) };
 }
 
-export const useChat = create<ChatState>((set, get) => ({
-  status: 'idle',
-  contacts: {},
-  conversations: {},
-  messages: {},
-  calls: [],
+// ——— Live mode: engine snapshot → UI shapes ———
 
-  load: async () => {
-    if (get().status !== 'idle') return;
-    set({ status: 'loading' });
-    const { slowLoading, emptyData } = useDevSettings.getState();
-    if (slowLoading) await new Promise((r) => setTimeout(r, 1500));
-    const data = buildFixtures();
-    const messages: Record<string, Message[]> = {};
-    for (const m of data.messages) (messages[m.conversationId] ??= []).push(m);
-    for (const list of Object.values(messages)) list.sort((a, b) => a.createdAt - b.createdAt);
-    set({
-      status: 'ready',
-      contacts: Object.fromEntries(data.contacts.map((c) => [c.id, c])),
-      conversations: emptyData ? {} : Object.fromEntries(data.conversations.map((c) => [c.id, c])),
-      messages: emptyData ? {} : messages,
-      calls: emptyData ? [] : data.calls,
-    });
-  },
+/** Sent → delivered → read, from every other member's receipt positions. */
+export function messageStatus(
+  m: LocalMessage,
+  conversation: ServerConversation | undefined,
+  me: string,
+  showRead: boolean,
+): MessageStatus {
+  if (m.state === 'pending') return 'sending';
+  if (m.state === 'failed') return 'failed';
+  const others = conversation?.members.filter((x) => x.userId !== me) ?? [];
+  if (others.length === 0 || m.seq === null) return 'sent';
+  if (showRead && others.every((o) => o.lastReadSeq >= m.seq!)) return 'read';
+  if (others.every((o) => o.lastDeliveredSeq >= m.seq!)) return 'delivered';
+  return 'sent';
+}
 
-  send: (conversationId, draft) => {
-    const id = localId('msg');
-    const message: Message = {
-      id,
-      conversationId,
-      senderId: ME,
-      text: draft.text?.trim() || undefined,
-      attachment: draft.attachment,
-      replyToId: draft.replyToId,
-      createdAt: Date.now(),
-      status: 'sending',
-      reactions: [],
+export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRead: boolean) {
+  const mapId = (id: string) => (id === me ? ME : id);
+  const contacts: Record<string, Contact> = {};
+  for (const u of Object.values(snap.users)) {
+    contacts[u.id] = {
+      id: u.id,
+      displayName: u.displayName,
+      username: u.username,
+      about: u.about || undefined,
     };
-    set((s) => ({
-      messages: {
-        ...s.messages,
-        [conversationId]: [...(s.messages[conversationId] ?? []), message],
-      },
-    }));
-
-    const setStatus = (status: Message['status']) =>
-      set((s) => ({
-        messages: updateMessage(s.messages, conversationId, id, (m) => ({ ...m, status })),
-      }));
-    setTimeout(() => setStatus('sent'), 350);
-    setTimeout(() => setStatus('delivered'), 1100);
-    setTimeout(() => setStatus('read'), 2200);
-
-    const conversation = get().conversations[conversationId];
-    if (!useDevSettings.getState().simulateReplies || conversation?.kind !== 'direct') return;
-    const other = conversation.memberIds.find((m) => m !== ME);
-    if (!other) return;
-
-    const setTyping = (typing: boolean) =>
-      set((s) => {
-        const c = s.conversations[conversationId];
-        if (!c) return s;
-        return {
-          conversations: {
-            ...s.conversations,
-            [conversationId]: { ...c, typingUserIds: typing ? [other] : [] },
-          },
-        };
-      });
-    setTimeout(() => setTyping(true), 2600);
-    setTimeout(() => {
-      setTyping(false);
-      const reply: Message = {
-        id: localId('msg'),
-        conversationId,
-        senderId: other,
-        text: CANNED_REPLIES[counter % CANNED_REPLIES.length],
-        createdAt: Date.now(),
-        status: 'delivered',
-        reactions: [],
+  }
+  const conversations: Record<string, Conversation> = {};
+  const byId = new Map(snap.conversations.map((c) => [c.id, c]));
+  for (const c of snap.conversations) {
+    conversations[c.id] = {
+      id: c.id,
+      kind: c.kind,
+      title: c.title ?? undefined,
+      memberIds: c.members.map((m) => mapId(m.userId)),
+      adminIds: c.members.filter((m) => m.role === 'admin').map((m) => mapId(m.userId)),
+      pinned: overlay.pinned[c.id] ?? false,
+      muted: overlay.muted[c.id] ?? false,
+      unreadCount: c.unreadCount,
+      typingUserIds: (snap.typing[c.id] ?? []).filter((u) => u !== me),
+      createdAt: c.createdAt,
+    };
+  }
+  const messages: Record<string, Message[]> = {};
+  for (const [convId, list] of Object.entries(snap.messages)) {
+    messages[convId] = list.map((m) => {
+      const deleted = overlay.deleted[m.id] === true;
+      return {
+        id: m.id,
+        conversationId: m.conversationId,
+        senderId: mapId(m.senderId),
+        text: deleted ? undefined : m.body,
+        createdAt: m.createdAt,
+        status: m.senderId === me ? messageStatus(m, byId.get(convId), me, showRead) : 'delivered',
+        replyToId: m.replyToId ?? undefined,
+        reactions: deleted ? [] : (overlay.reactions[m.id] ?? []),
+        deleted,
       };
-      set((s) => ({
-        messages: {
-          ...s.messages,
-          [conversationId]: [...(s.messages[conversationId] ?? []), reply],
-        },
-      }));
-    }, 4800);
-  },
+    });
+  }
+  return { contacts, conversations, messages, hasMore: snap.hasMore, connection: snap.connection };
+}
 
-  toggleReaction: (conversationId, messageId, emoji) =>
-    set((s) => ({
-      messages: updateMessage(s.messages, conversationId, messageId, (m) => {
-        const mine = m.reactions.find((r) => r.userIds.includes(ME));
+export const useChat = create<ChatState>((set, get) => {
+  const refreshLive = () => {
+    if (!engine || !engineMe || get().mode !== 'live') return;
+    set(
+      deriveLive(
+        engine.getSnapshot(),
+        engineMe,
+        get().overlay,
+        usePreferences.getState().readReceipts,
+      ),
+    );
+  };
+  const setOverlay = (patch: (o: Overlay) => Overlay) => {
+    set({ overlay: patch(get().overlay) });
+    refreshLive();
+  };
+
+  return {
+    mode: 'live',
+    status: 'idle',
+    connection: 'offline',
+    contacts: {},
+    conversations: {},
+    messages: {},
+    hasMore: {},
+    calls: [],
+    overlay: EMPTY_OVERLAY,
+
+    load: async (me) => {
+      if (get().status !== 'idle') return;
+      set({ status: 'loading' });
+      const { sampleData, slowLoading, emptyData } = useDevSettings.getState();
+
+      if (sampleData || !me) {
+        if (slowLoading) await new Promise((r) => setTimeout(r, 1500));
+        const data = buildFixtures();
+        const messages: Record<string, Message[]> = {};
+        for (const m of data.messages) (messages[m.conversationId] ??= []).push(m);
+        for (const list of Object.values(messages)) list.sort((a, b) => a.createdAt - b.createdAt);
+        set({
+          mode: 'sample',
+          status: 'ready',
+          connection: 'online',
+          contacts: Object.fromEntries(data.contacts.map((c) => [c.id, c])),
+          conversations: emptyData
+            ? {}
+            : Object.fromEntries(data.conversations.map((c) => [c.id, c])),
+          messages: emptyData ? {} : messages,
+          calls: emptyData ? [] : data.calls,
+        });
+        return;
+      }
+
+      if (engine && engineMe !== me) {
+        unsubscribe?.();
+        engine.stop();
+        engine = null;
+      }
+      engineMe = me;
+      engine ??= createMessagingEngine(me, () => void get().unload());
+      unsubscribe?.();
+      unsubscribe = engine.subscribe(refreshLive);
+      set({ mode: 'live', calls: [] });
+      await engine.start();
+      if (slowLoading) await new Promise((r) => setTimeout(r, 1500));
+      refreshLive();
+      set({ status: 'ready' });
+    },
+
+    unload: async () => {
+      unsubscribe?.();
+      unsubscribe = null;
+      if (engine) await engine.reset();
+      else await clearMessageCache().catch(() => {});
+      engine = null;
+      engineMe = null;
+      set({
+        status: 'idle',
+        contacts: {},
+        conversations: {},
+        messages: {},
+        hasMore: {},
+        calls: [],
+        overlay: EMPTY_OVERLAY,
+      });
+    },
+
+    resume: () => engine?.resume(),
+
+    send: (conversationId, draft) => {
+      if (get().mode === 'live') {
+        if (draft.text?.trim()) engine?.send(conversationId, draft.text, draft.replyToId ?? null);
+        return;
+      }
+      sampleSend(set, get, conversationId, draft);
+    },
+
+    retry: (messageId) => engine?.retry(messageId),
+    loadOlder: async (conversationId) => {
+      if (get().mode === 'live') await engine?.loadOlder(conversationId);
+    },
+    typing: (conversationId) => engine?.typing(conversationId),
+
+    toggleReaction: (conversationId, messageId, emoji) => {
+      const apply = (current: Reaction[]) => {
+        const mine = current.find((r) => r.userIds.includes(ME));
         // One reaction per person: remove my previous one, then add unless toggling off.
-        let reactions = m.reactions
+        let reactions = current
           .map((r) => ({ ...r, userIds: r.userIds.filter((u) => u !== ME) }))
           .filter((r) => r.userIds.length > 0);
         if (mine?.emoji !== emoji) {
@@ -155,70 +272,193 @@ export const useChat = create<ChatState>((set, get) => ({
             ? reactions.map((r) => (r.emoji === emoji ? { ...r, userIds: [...r.userIds, ME] } : r))
             : [...reactions, { emoji, userIds: [ME] }];
         }
-        return { ...m, reactions };
-      }),
-    })),
+        return reactions;
+      };
+      if (get().mode === 'live') {
+        setOverlay((o) => ({
+          ...o,
+          reactions: { ...o.reactions, [messageId]: apply(o.reactions[messageId] ?? []) },
+        }));
+        return;
+      }
+      set((s) => ({
+        messages: updateMessage(s.messages, conversationId, messageId, (m) => ({
+          ...m,
+          reactions: apply(m.reactions),
+        })),
+      }));
+    },
 
-  deleteMessage: (conversationId, messageId) =>
+    deleteMessage: (conversationId, messageId) => {
+      if (get().mode === 'live') {
+        setOverlay((o) => ({ ...o, deleted: { ...o.deleted, [messageId]: true } }));
+        return;
+      }
+      set((s) => ({
+        messages: updateMessage(s.messages, conversationId, messageId, (m) => ({
+          ...m,
+          deleted: true,
+          text: undefined,
+          attachment: undefined,
+          reactions: [],
+        })),
+      }));
+    },
+
+    markRead: (conversationId) => {
+      if (get().mode === 'live') {
+        engine?.markRead(conversationId);
+        return;
+      }
+      set((s) => {
+        const c = s.conversations[conversationId];
+        if (!c || c.unreadCount === 0) return s;
+        return {
+          conversations: { ...s.conversations, [conversationId]: { ...c, unreadCount: 0 } },
+        };
+      });
+    },
+
+    setPinned: (conversationId, pinned) => {
+      if (get().mode === 'live')
+        return setOverlay((o) => ({ ...o, pinned: { ...o.pinned, [conversationId]: pinned } }));
+      set((s) => {
+        const c = s.conversations[conversationId];
+        return c
+          ? { conversations: { ...s.conversations, [conversationId]: { ...c, pinned } } }
+          : s;
+      });
+    },
+
+    setMuted: (conversationId, muted) => {
+      if (get().mode === 'live')
+        return setOverlay((o) => ({ ...o, muted: { ...o.muted, [conversationId]: muted } }));
+      set((s) => {
+        const c = s.conversations[conversationId];
+        return c ? { conversations: { ...s.conversations, [conversationId]: { ...c, muted } } } : s;
+      });
+    },
+
+    createConversation: async (memberIds, title) => {
+      const others = memberIds.filter((m) => m !== ME);
+      if (get().mode === 'live') {
+        if (!engine) throw new Error('Not connected');
+        return title || others.length > 1
+          ? engine.createConversation({ kind: 'group', title: title || 'Group', memberIds: others })
+          : engine.createConversation({ kind: 'direct', userId: others[0]! });
+      }
+      return sampleCreate(set, get, others, title);
+    },
+
+    addCall: (call) => set((s) => ({ calls: [{ id: localId('call'), ...call }, ...s.calls] })),
+  };
+});
+
+// Re-derive ticks when the read-receipts preference changes (reciprocity).
+usePreferences.subscribe((p, prev) => {
+  if (
+    p.readReceipts !== prev.readReceipts &&
+    engine &&
+    engineMe &&
+    useChat.getState().mode === 'live'
+  ) {
+    useChat.setState(
+      deriveLive(engine.getSnapshot(), engineMe, useChat.getState().overlay, p.readReceipts),
+    );
+  }
+});
+
+// ——— Sample mode (design review only) ———
+
+type SetFn = (partial: Partial<ChatState> | ((s: ChatState) => Partial<ChatState>)) => void;
+type GetFn = () => ChatState;
+
+function sampleSend(set: SetFn, get: GetFn, conversationId: string, draft: Draft) {
+  const id = localId('msg');
+  const message: Message = {
+    id,
+    conversationId,
+    senderId: ME,
+    text: draft.text?.trim() || undefined,
+    attachment: draft.attachment,
+    replyToId: draft.replyToId,
+    createdAt: Date.now(),
+    status: 'sending',
+    reactions: [],
+  };
+  set((s) => ({
+    messages: { ...s.messages, [conversationId]: [...(s.messages[conversationId] ?? []), message] },
+  }));
+
+  const setStatus = (status: Message['status']) =>
     set((s) => ({
-      messages: updateMessage(s.messages, conversationId, messageId, (m) => ({
-        ...m,
-        deleted: true,
-        text: undefined,
-        attachment: undefined,
-        reactions: [],
-      })),
-    })),
+      messages: updateMessage(s.messages, conversationId, id, (m) => ({ ...m, status })),
+    }));
+  setTimeout(() => setStatus('sent'), 350);
+  setTimeout(() => setStatus('delivered'), 1100);
+  setTimeout(() => setStatus('read'), 2200);
 
-  markRead: (conversationId) =>
+  const conversation = get().conversations[conversationId];
+  if (!useDevSettings.getState().simulateReplies || conversation?.kind !== 'direct') return;
+  const other = conversation.memberIds.find((m) => m !== ME);
+  if (!other) return;
+  const setTyping = (typing: boolean) =>
     set((s) => {
       const c = s.conversations[conversationId];
-      if (!c || c.unreadCount === 0) return s;
-      return { conversations: { ...s.conversations, [conversationId]: { ...c, unreadCount: 0 } } };
-    }),
-
-  setPinned: (conversationId, pinned) =>
-    set((s) => {
-      const c = s.conversations[conversationId];
-      return c ? { conversations: { ...s.conversations, [conversationId]: { ...c, pinned } } } : s;
-    }),
-
-  setMuted: (conversationId, muted) =>
-    set((s) => {
-      const c = s.conversations[conversationId];
-      return c ? { conversations: { ...s.conversations, [conversationId]: { ...c, muted } } } : s;
-    }),
-
-  createConversation: (memberIds, title) => {
-    const members = [ME, ...memberIds.filter((m) => m !== ME)];
-    if (members.length === 2 && !title) {
-      const existing = Object.values(get().conversations).find(
-        (c) => c.kind === 'direct' && c.memberIds.includes(members[1]!),
-      );
-      if (existing) return existing.id;
-    }
-    const id = localId('conv');
-    const conversation: Conversation = {
-      id,
-      kind: members.length > 2 || title ? 'group' : 'direct',
-      title,
-      memberIds: members,
-      adminIds: [ME],
-      pinned: false,
-      muted: false,
-      unreadCount: 0,
-      typingUserIds: [],
+      return c
+        ? {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: { ...c, typingUserIds: typing ? [other] : [] },
+            },
+          }
+        : s;
+    });
+  setTimeout(() => setTyping(true), 2600);
+  setTimeout(() => {
+    setTyping(false);
+    const reply: Message = {
+      id: localId('msg'),
+      conversationId,
+      senderId: other,
+      text: CANNED_REPLIES[counter % CANNED_REPLIES.length],
       createdAt: Date.now(),
+      status: 'delivered',
+      reactions: [],
     };
     set((s) => ({
-      conversations: { ...s.conversations, [id]: conversation },
-      messages: { ...s.messages, [id]: [] },
+      messages: { ...s.messages, [conversationId]: [...(s.messages[conversationId] ?? []), reply] },
     }));
-    return id;
-  },
+  }, 4800);
+}
 
-  addCall: (call) => set((s) => ({ calls: [{ id: localId('call'), ...call }, ...s.calls] })),
-}));
+function sampleCreate(set: SetFn, get: GetFn, others: string[], title?: string): string {
+  const members = [ME, ...others];
+  if (members.length === 2 && !title) {
+    const existing = Object.values(get().conversations).find(
+      (c) => c.kind === 'direct' && c.memberIds.includes(members[1]!),
+    );
+    if (existing) return existing.id;
+  }
+  const id = localId('conv');
+  const conversation: Conversation = {
+    id,
+    kind: members.length > 2 || title ? 'group' : 'direct',
+    title,
+    memberIds: members,
+    adminIds: [ME],
+    pinned: false,
+    muted: false,
+    unreadCount: 0,
+    typingUserIds: [],
+    createdAt: Date.now(),
+  };
+  set((s) => ({
+    conversations: { ...s.conversations, [id]: conversation },
+    messages: { ...s.messages, [id]: [] },
+  }));
+  return id;
+}
 
 // ——— Selectors (pure, unit-tested) ———
 

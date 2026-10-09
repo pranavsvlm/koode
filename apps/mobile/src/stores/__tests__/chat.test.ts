@@ -7,7 +7,12 @@ const initial = useChat.getState();
 beforeEach(async () => {
   jest.useRealTimers();
   useChat.setState(initial, true);
-  useDevSettings.setState({ slowLoading: false, emptyData: false, simulateReplies: false });
+  useDevSettings.setState({
+    sampleData: true,
+    slowLoading: false,
+    emptyData: false,
+    simulateReplies: false,
+  });
   await useChat.getState().load();
 });
 
@@ -73,9 +78,9 @@ describe('chat store', () => {
     expect(messagePreview(lastMessage('c-maya'))).toBe('Message deleted');
   });
 
-  it('reuses an existing direct conversation', () => {
-    expect(useChat.getState().createConversation(['maya'])).toBe('c-maya');
-    const group = useChat.getState().createConversation(['maya', 'leo'], 'Trip');
+  it('reuses an existing direct conversation', async () => {
+    expect(await useChat.getState().createConversation(['maya'])).toBe('c-maya');
+    const group = await useChat.getState().createConversation(['maya', 'leo'], 'Trip');
     expect(useChat.getState().conversations[group]).toMatchObject({ kind: 'group', title: 'Trip' });
   });
 

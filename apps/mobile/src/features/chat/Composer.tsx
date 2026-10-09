@@ -24,6 +24,8 @@ export type ComposerProps = {
   onSend: (text: string) => void;
   onAttach: () => void;
   onVoice: () => void;
+  /** Called as the user types (throttled downstream into typing indicators). */
+  onTyping?: () => void;
 };
 
 export function Composer({
@@ -33,6 +35,7 @@ export function Composer({
   onSend,
   onAttach,
   onVoice,
+  onTyping,
 }: ComposerProps) {
   const colors = useThemeColors();
   const insets = useSafeAreaInsets();
@@ -93,7 +96,10 @@ export function Composer({
         <View className="min-h-[38px] flex-1 justify-center rounded-[19px] bg-fill px-4">
           <TextInput
             value={text}
-            onChangeText={setText}
+            onChangeText={(t) => {
+              setText(t);
+              if (t.trim()) onTyping?.();
+            }}
             placeholder="Message"
             placeholderTextColor={colors['text-tertiary']}
             selectionColor={colors.accent}

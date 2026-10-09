@@ -69,5 +69,8 @@ export const devices = new Hono<AppEnv>()
         .bind(now, target),
       auditStatement(db, 'device_revoked', { userId, deviceId }, { target }),
     ]);
+    c.executionCtx.waitUntil(
+      c.env.USER_SOCKET.get(c.env.USER_SOCKET.idFromName(userId)).disconnectDevice(target),
+    );
     return c.json<OkResponse>({ ok: true });
   });

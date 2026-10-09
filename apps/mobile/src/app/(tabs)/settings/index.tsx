@@ -119,7 +119,7 @@ function DeveloperSection() {
   return (
     <ListSection
       title="Developer"
-      footer={`API: ${env.apiUrl}. Data on this build is sample data held in memory; nothing is sent to the server yet.`}
+      footer={`API: ${env.apiUrl}. Accounts and messages are real (local server). Calls, reactions and media are still simulated. Empty data and simulated replies apply to sample data only.`}
     >
       <ListRow
         icon="server"
@@ -166,10 +166,18 @@ function DeveloperSection() {
       <ListRow
         icon="download"
         iconTint="success"
-        title="Reload sample data"
-        onPress={() => {
-          useChat.setState({ status: 'idle' });
-          void useChat.getState().load();
+        title="Sample data"
+        subtitle="Show built-in conversations instead of your real ones"
+        accessory={{
+          type: 'switch',
+          value: dev.sampleData,
+          onValueChange: (v) => {
+            dev.set({ sampleData: v });
+            void useChat
+              .getState()
+              .unload()
+              .then(() => useChat.getState().load(useSession.getState().user?.id));
+          },
         }}
       />
       <ListRow

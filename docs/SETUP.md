@@ -97,6 +97,23 @@ any 12-character invite code, or choose "I already have an account" and enter an
 server, and has switches for slow loading, empty data, simulated replies and
 simulated incoming calls.
 
+### Two-person messaging check
+
+To see real messages flow between two accounts on one Mac:
+
+1. Create two invites with `invite:create`: one for the app, one for the peer.
+2. Start the app tour in messaging mode, then the peer:
+
+```sh
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=messaging EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/peer.mjs <peer code without dashes> <path to Metro's log>
+```
+
+The peer ("Maya", a Node client) starts a chat with the account the app registers,
+reads the app's message, types and replies. The app logs the final conversation as
+`[tour-msg] final …`.
+
 ### Reviewing every screen without tapping
 
 On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep
@@ -215,5 +232,8 @@ pnpm --filter @koode/server cf-typegen
 - **"Open in Koode Dev?" keeps appearing:** iOS 27 asks for confirmation on every URL
   sent with `simctl openurl`, even when the app is open. Tap Open, or use the screen
   tour above.
+- **`429 Too many requests` while testing locally:** every local client shares one
+  "unknown IP" rate-limit bucket (5 registrations per hour). Reset it with
+  `pnpm --filter @koode/server exec wrangler d1 execute DB --local --command "DELETE FROM rate_limits"`.
 - **Fast Refresh stops updating after a syntax error:** fix the error, then relaunch
   the app. The dev client reopens the last Metro server automatically.

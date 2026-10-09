@@ -45,11 +45,16 @@ describe('D1 migrations', () => {
   });
 });
 
-describe('ConversationRoom Durable Object', () => {
-  it('is bound and reachable', async () => {
-    const stub = env.CONVERSATION_ROOM.get(env.CONVERSATION_ROOM.idFromName('test'));
-    const res = await stub.fetch('https://do/');
-    expect(res.status).toBe(501);
+describe('Durable Objects', () => {
+  it('ConversationRoom answers RPC and refuses unknown conversations', async () => {
+    const stub = env.CONVERSATION_ROOM.get(env.CONVERSATION_ROOM.idFromName('cnv_missing'));
+    const res = await stub.typing({ conversationId: 'cnv_missing', userId: 'usr_x' });
+    expect(res).toMatchObject({ ok: false, code: 'not_found' });
+  });
+
+  it('UserSocket starts with no connections', async () => {
+    const stub = env.USER_SOCKET.get(env.USER_SOCKET.idFromName('usr_x'));
+    expect(await stub.connectionCount()).toBe(0);
   });
 });
 

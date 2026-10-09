@@ -3,6 +3,7 @@ import '@/theme/interop';
 
 import { SplashScreen, Stack } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
+import { AppState } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
@@ -41,12 +42,21 @@ function useHydrated() {
 function RootStack() {
   const colors = useThemeColors();
   const signedIn = useSession((s) => s.status === 'signedIn');
+  const userId = useSession((s) => s.user?.id);
   const loadChat = useChat((s) => s.load);
   useDevTour(process.env.EXPO_PUBLIC_DEV_TOUR);
 
   useEffect(() => {
-    if (signedIn) void loadChat();
-  }, [signedIn, loadChat]);
+    if (signedIn && userId) void loadChat(userId);
+  }, [signedIn, userId, loadChat]);
+
+  // Reconnect / catch up when the app returns to the foreground.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') useChat.getState().resume();
+    });
+    return () => sub.remove();
+  }, []);
 
   return (
     <Stack

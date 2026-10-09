@@ -183,6 +183,8 @@ export function createAuthClient(deps: AuthClientDeps) {
     },
 
     getAccessToken,
+    /** Authenticated request with automatic renewal (used by messaging). */
+    request: authed,
     me: () => authed('/v1/me', User),
     updateProfile: (patch: { displayName?: string; about?: string }) =>
       authed('/v1/me', User, { method: 'PATCH', body: patch }),

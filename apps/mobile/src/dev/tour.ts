@@ -42,7 +42,7 @@ const signIn = () => {
       recoveryKey: generateRecoveryKey(Crypto.getRandomBytes),
     })
     .then(
-      () => console.log(`[tour-auth] registered @${username}`),
+      () => console.log(`[tour-auth] registered @${username} id=${useSession.getState().user?.id}`),
       (e: unknown) =>
         console.log(`[tour-auth] FAILED ${e instanceof Error ? e.message : String(e)}`),
     );
@@ -146,6 +146,54 @@ export const TOUR: Step[] = [
 ];
 
 /** `mode`: '1' keeps current appearance; 'light' / 'dark' force it (restored afterwards). */
+const firstConversationId = () =>
+  Object.values(useChat.getState().conversations).sort((x, y) => y.createdAt - x.createdAt)[0]?.id;
+
+/**
+ * Two-party messaging check against the real server. A peer script
+ * (apps/server/scripts/peer.mjs) plays "Maya": it starts a chat with the
+ * account registered here, replies, reads and types.
+ */
+export const MESSAGING_TOUR: Step[] = [
+  {
+    name: 'register',
+    run: () => {
+      useDevSettings.getState().set({ sampleData: false });
+      signIn();
+    },
+  },
+  { name: 'wait-for-peer', run: () => {} },
+  { name: 'chats-live', run: go('/chats') },
+  {
+    name: 'chat-live',
+    run: () => {
+      const id = firstConversationId();
+      console.log(`[tour-msg] conversation ${id ?? 'NONE'}`);
+      if (id) router.navigate(`/chat/${id}`);
+    },
+  },
+  {
+    name: 'send',
+    run: () => {
+      const id = firstConversationId();
+      if (id) useChat.getState().send(id, { text: 'Hello from the Simulator 👋' });
+      console.log('[tour-msg] sent');
+    },
+  },
+  { name: 'peer-typing', run: () => {} },
+  { name: 'after-reply', run: () => {} },
+  {
+    name: 'done',
+    run: () => {
+      const id = firstConversationId();
+      const list = (id && useChat.getState().messages[id]) || [];
+      console.log(
+        `[tour-msg] final ${JSON.stringify(list.map((m) => [m.senderId === 'me' ? 'me' : 'peer', m.text, m.status]))}`,
+      );
+    },
+  },
+];
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
@@ -155,6 +203,7 @@ export function useDevTour(mode: string | undefined) {
     void useSession.getState().signOut();
     const prefs = usePreferences.getState();
     const saved = { appearance: prefs.appearance, accent: prefs.accent };
+    if (mode !== 'messaging') useDevSettings.getState().set({ sampleData: true });
     if (mode === 'light' || mode === 'dark') {
       prefs.set('appearance', mode as AppearancePreference);
       prefs.set('accent', 'blue');
@@ -163,9 +212,10 @@ export function useDevTour(mode: string | undefined) {
       usePreferences.getState().set('appearance', saved.appearance);
       usePreferences.getState().set('accent', saved.accent);
     };
+    const steps = mode === 'messaging' ? MESSAGING_TOUR : TOUR;
     let i = 0;
     const tick = () => {
-      const step = TOUR[i];
+      const step = steps[i];
       if (!step) return;
       step.run();
       // Log after navigation settles so screenshots match the step.

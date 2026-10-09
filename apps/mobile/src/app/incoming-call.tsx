@@ -5,6 +5,7 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar, Text, useToast } from '@/components/ui';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
+import { openConversation } from '@/features/chat/openConversation';
 import { CallControlButton } from '@/features/call/CallControls';
 import { PulseRings } from '@/features/call/PulseRings';
 import type { CallKind } from '@/domain/types';
@@ -82,11 +83,9 @@ export default function IncomingCallScreen() {
               size={52}
               onPress={() => {
                 decline();
-                const direct = Object.values(useChat.getState().conversations).find(
-                  (c) => c.kind === 'direct' && c.memberIds.includes(contactId),
+                openConversation([contactId]).catch(() =>
+                  toast.show({ title: 'Couldn’t open the chat', tone: 'error' }),
                 );
-                const convId = direct?.id ?? useChat.getState().createConversation([contactId]);
-                router.push(`/chat/${convId}`);
               }}
             />
           </View>

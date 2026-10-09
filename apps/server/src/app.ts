@@ -10,6 +10,9 @@ import { devices } from './routes/devices';
 import { health } from './routes/health';
 import { invites } from './routes/invites';
 import { me } from './routes/me';
+import { conversations } from './routes/conversations';
+import { realtime } from './routes/realtime';
+import { users } from './routes/users';
 
 export type AppEnv = { Bindings: Env; Variables: RequestIdVariables & { auth: AccessClaims } };
 
@@ -18,6 +21,9 @@ export function createApp() {
 
   app.use(requestId());
   app.use(requestLogger());
+  // Registered before the header middleware below, so the 101 upgrade response
+  // passes through untouched.
+  app.route(`${API_PREFIX}/realtime`, realtime);
   app.use(secureHeaders());
   // API responses are per-user and must never be cached by intermediaries.
   app.use(async (c, next) => {
@@ -33,6 +39,8 @@ export function createApp() {
   app.route(`${API_PREFIX}/me`, me);
   app.route(`${API_PREFIX}/devices`, devices);
   app.route(`${API_PREFIX}/invites`, invites);
+  app.route(`${API_PREFIX}/users`, users);
+  app.route(`${API_PREFIX}/conversations`, conversations);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found', c.get('requestId')), 404));
 

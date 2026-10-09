@@ -139,23 +139,58 @@ No email address, phone number or password is collected. The API is documented i
    - Names reject control and bidi-override characters.
 8. **Audit:** registrations, logins, recoveries, refresh-token reuse, device and
    invite changes are recorded without any secrets.
-9. **Planned:** WebSocket tickets (Phase 4) and linking a new device from an existing
-   one (QR).
+9. **Planned:** linking a new device from an existing one (QR).
 
-## Messaging (planned, Phase 4)
+## Messaging (implemented, Phase 4)
 
-- **Message IDs:** the client generates a ULID for each message, which makes retries
-  idempotent. The conversation's Durable Object assigns a monotonically increasing
-  `seq`.
-- **Delivery states:** `sending → sent` (server ack with `seq`), then `delivered` and
-  `read` from recipient receipts. Typing indicators are ephemeral and never persisted.
-- **Sync:** on (re)connect the client sends its last `seq` per conversation, and the
-  server replays newer messages. History pagination is keyset-based on `seq`.
-- **Reconnects:** exponential backoff with jitter. Network-change and foreground events
-  trigger an immediate reconnect.
-- **E2EE readiness:** messages are stored and relayed as opaque envelopes with an
-  `encryption` field (`none` until Phase 8) and are addressed per recipient device.
-  Phase 8 can then add encryption without redesigning the delivery path.
+```
+app ──HTTP POST /messages──► Worker ──RPC──► ConversationRoom DO ──► D1 (messages, last_seq)
+                                                   │ fan-out (RPC)
+app ◄──WebSocket events──── UserSocket DO ◄────────┘   (one per user; all their devices)
+```
+
+- **Durable Objects:**
+  - **`ConversationRoom`** (one per conversation) is the single writer for the
+    conversation's `seq`. The counter is incremented synchronously in memory, so
+    concurrent sends can't collide. It persists to D1 and fans out messages, receipts
+    and typing.
+  - **`UserSocket`** (one per user) holds every device's WebSocket using the
+    Hibernation API. Heartbeats are auto-answered without waking it. When a device
+    signs out or is removed, its socket is closed (code 4001).
+- **Sending:**
+  - Sends go over HTTP (`POST /v1/conversations/:id/messages`), so the response is the
+    acknowledgement.
+  - The client-generated UUID makes retries idempotent; reusing an id elsewhere returns 409.
+- **Receiving:** live events (`message`, `receipt`, `typing`, `conversation`) arrive
+  over `GET /v1/realtime`. The upgrade authenticates with the normal
+  `Authorization: Bearer` header (React Native supports headers on WebSockets), so no
+  token is ever put in a URL. This replaced the planned single-use tickets.
+- **Receipts:**
+  - `delivered` and `read` positions per member only move forward and are capped at the
+    last message.
+  - With **Read Receipts** off, your real read position still drives unread counts, but
+    the one shown to others (`shared_read_seq`) stops advancing.
+  - The setting is reciprocal: with yours off, you don't see others' read ticks either.
+- **App engine (`features/messaging`):**
+  - SQLite cache, so chats open instantly and are readable offline.
+  - Offline outbox: sends are shown immediately and delivered in order once connected.
+    Permanent rejections show as failed; tap to retry.
+  - Reconnection with exponential backoff (1 s → 30 s, with jitter).
+  - A 25 s heartbeat with a 10 s pong timeout catches silently dead connections, such
+    as after a network switch. Foregrounding the app reconnects immediately.
+  - After reconnecting it catches up: the conversation list, then `after=<max seq>`
+    per chat.
+  - History: the newest 50 messages for a new chat, then older pages on scroll.
+  - Delivered and read receipts are batched (400 ms); typing sends are throttled (3 s),
+    and incoming typing indicators expire after 5 s.
+- **Directory:** `GET /v1/users` lists every active member of the instance (it's
+  invite-only), with public profile fields only.
+- **Not yet server-side (Phase 7):** reactions, deleting messages, pin and mute (kept
+  on the device), media, and group administration. Groups can already be created and
+  used for messaging.
+- **End-to-end encryption (Phase 8):** message bodies are plaintext in D1 and the cache
+  today. Each message row carries an `encryption` column, and Phase 8 adds per-device
+  ciphertext envelopes. Until then, the server can read messages.
 
 ## Calling (planned, Phase 5)
 

@@ -16,7 +16,9 @@ export function chatSubtitle(
   if (typer) return 'typing…';
   const other = contacts[c.memberIds.find((m) => m !== ME) ?? ''];
   if (!other) return '';
-  return other.online ? 'online' : formatLastSeen(other.lastSeenAt);
+  if (other.online) return 'online';
+  // Live accounts have no presence yet: show the username rather than guess.
+  return other.lastSeenAt !== undefined ? formatLastSeen(other.lastSeenAt) : `@${other.username}`;
 }
 
 export function ChatHeaderTitle({
