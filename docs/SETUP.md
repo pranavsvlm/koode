@@ -73,6 +73,22 @@ livekit-server --dev --bind 0.0.0.0     # ws://localhost:7880, key "devkey", sec
 `.dev.vars`. On a physical phone, set `LIVEKIT_URL` to your Mac's LAN address
 (`ws://192.168.x.x:7880`) instead of `localhost`.
 
+### Push notifications: local push relay
+
+APNs needs HTTP/2, which the Worker can't speak, so pushes go through
+`apps/push-relay`. Locally it runs in **simulator mode**: alert pushes are
+delivered to the booted iOS Simulator with `xcrun simctl push`, no Apple account
+needed. VoIP pushes are dropped, because the Simulator has no PushKit.
+
+```sh
+cd apps/push-relay
+RELAY_SECRET=<same value as PUSH_RELAY_SECRET in apps/server/.dev.vars> \
+  APNS_MODE=simulator SIMULATOR=booted node src/main.ts     # listens on 127.0.0.1:8790
+```
+
+`.dev.vars` needs `PUSH_RELAY_URL=http://localhost:8790` and a random
+`PUSH_RELAY_SECRET` (at least 32 characters). Restart `wrangler dev` after changing it.
+
 ### Create the first account
 
 Koode is invite-only, so the very first invite comes from a script:
@@ -152,6 +168,31 @@ server's view. Grant the microphone first
 permission prompt stops the app from publishing audio. The Simulator's camera sends
 black frames.
 
+### Push notification check
+
+With the relay running (above):
+
+```sh
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=push EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/push-peer.mjs <peer code without dashes> <path to Metro's log> <flag file>
+```
+
+- **Backgrounding and closing:** the tour logs `[tour-push] background-now`; send
+  the app to the background then (e.g. `xcrun simctl launch booted
+com.apple.Preferences`), and bring it back once the peer prints
+  `background-done`. To test a closed app, terminate it and create the flag file;
+  the peer then sends one more message.
+- **Permission:** the Simulator can't tap "Allow", so the tour requests
+  _provisional_ permission. Notifications then go quietly to Notification Center:
+  check them in the log (`[tour-push] presented …`) rather than as banners.
+- **What the peer does:**
+  1. Sends a message while the app is open.
+  2. While it's in the background, sends a message, then makes a call that gives up
+     (missed call).
+  3. Makes another call, which the app answers from its notification.
+  4. Makes a call that the native VoIP handler reports to CallKit.
+
 ### Reviewing every screen without tapping
 
 On iOS 27 Simulators, every `xcrun simctl openurl` asks for confirmation, so deep
@@ -180,6 +221,23 @@ end. Restart Metro without the variable to stop the tour.
    asks you to choose a signing team. A free Apple ID works for local installs. Push,
    VoIP and TestFlight need the paid Developer Program.
 
+**Real push notifications and CallKit (paid Apple Developer account):**
+
+1. In the Apple Developer portal, enable Push Notifications for the app ID
+   (`com.navoasis.koode.dev`), and create an APNs **auth key** (.p8). Note its Key ID
+   and your Team ID.
+2. Run the relay in APNs mode where the Worker can reach it:
+
+   ```sh
+   RELAY_SECRET=… APNS_KEY_ID=… APNS_TEAM_ID=… APNS_KEY_FILE=/path/AuthKey_XXXX.p8 node src/main.ts
+   ```
+
+   Keep the .p8 file out of the repository. Hosting the relay for real use needs your
+   approval (see ARCHITECTURE → Services and cost).
+
+3. Development builds use the APNs sandbox; TestFlight builds use production. The app
+   reports which one it uses.
+
 ## 4. Android (cloud builds through EAS)
 
 There is no Android device or emulator here, so Android builds run on Expo's servers.
@@ -203,6 +261,13 @@ npx eas-cli@latest init        # prints a project ID
 4. Set `EXPO_PUBLIC_API_URL` for the `preview` and `production` environments on the EAS
    dashboard (Project → Environment variables). Release builds refuse to start
    without an `https://` URL.
+5. Push notifications (FCM):
+   1. Create a Firebase project and add an Android app with the package name.
+   2. Upload its `google-services.json` as an EAS **file** environment variable
+      named `GOOGLE_SERVICES_JSON`; for local builds, set `GOOGLE_SERVICES_JSON` to
+      its path. Don't commit it.
+   3. Put the project's service-account JSON (one line) in the Worker secret
+      `FCM_SERVICE_ACCOUNT`.
 
 ### Build profiles (`apps/mobile/eas.json`)
 

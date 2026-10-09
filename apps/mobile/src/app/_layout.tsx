@@ -3,13 +3,14 @@ import '@/theme/interop';
 
 import { registerGlobals } from '@livekit/react-native';
 
-import { SplashScreen, Stack } from 'expo-router';
+import { SplashScreen, Stack, usePathname } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
 import { CallRouter } from '@/features/calls/CallRouter';
+import { configureNotifications, useNotifications } from '@/features/notifications';
 import { useDevTour } from '@/dev/tour';
 import { DialogProvider, ToastProvider } from '@/components/ui';
 import { useChat } from '@/stores/chat';
@@ -21,6 +22,7 @@ import { ThemeProvider, useThemeColors } from '@/theme/ThemeProvider';
 registerGlobals();
 
 void SplashScreen.preventAutoHideAsync();
+configureNotifications();
 
 /** Wait for persisted stores so the first frame has the right theme and route. */
 function useHydrated() {
@@ -50,7 +52,14 @@ function RootStack() {
   const signedIn = useSession((s) => s.status === 'signedIn');
   const userId = useSession((s) => s.user?.id);
   const loadChat = useChat((s) => s.load);
+  const live = useChat((s) => s.mode === 'live' && s.status === 'ready');
   useDevTour(process.env.EXPO_PUBLIC_DEV_TOUR);
+  useNotifications(signedIn && live);
+  // Development: route changes in the Metro log during screen tours.
+  const pathname = usePathname();
+  useEffect(() => {
+    if (__DEV__ && process.env.EXPO_PUBLIC_DEV_TOUR) console.log(`[nav] ${pathname}`);
+  }, [pathname]);
 
   useEffect(() => {
     if (signedIn && userId) void loadChat(userId);

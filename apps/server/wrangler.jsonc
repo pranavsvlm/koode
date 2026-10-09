@@ -10,6 +10,9 @@
   // `wrangler secret put` remotely — never in this file.
   "vars": {
     "ENVIRONMENT": "development",
+    // APNs topics (bundle ids) this server may push to; devices registering any
+    // other app id are rejected.
+    "PUSH_APP_IDS": "com.navoasis.koode.dev,com.navoasis.koode.preview,com.navoasis.koode",
   },
 
   "d1_databases": [
@@ -35,10 +38,12 @@
     "bindings": [
       { "name": "CONVERSATION_ROOM", "class_name": "ConversationRoom" },
       { "name": "USER_SOCKET", "class_name": "UserSocket" },
+      { "name": "CALL_TIMER", "class_name": "CallTimer" },
     ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ConversationRoom"] },
     { "tag": "v2", "new_sqlite_classes": ["UserSocket"] },
+    { "tag": "v3", "new_sqlite_classes": ["CallTimer"] },
   ],
 }

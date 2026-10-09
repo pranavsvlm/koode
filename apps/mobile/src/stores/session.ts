@@ -2,6 +2,7 @@ import type { User } from '@koode/shared';
 import Storage from 'expo-sqlite/kv-store';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import { clearNotifications } from '@/features/notifications/clear';
 import { authClient } from '@/features/auth';
 import { useChat } from './chat';
 
@@ -64,6 +65,7 @@ export const useSession = create<SessionState>()(
       signOut: async () => {
         await authClient.logout();
         await useChat.getState().unload();
+        clearNotifications();
         set({ status: 'signedOut', user: null });
       },
     }),
@@ -79,5 +81,6 @@ export const useSession = create<SessionState>()(
 // The device was revoked or its key rejected: drop to the signed-out flow.
 authClient.setOnSignedOut(() => {
   void useChat.getState().unload();
+  clearNotifications();
   useSession.setState({ status: 'signedOut', user: null });
 });

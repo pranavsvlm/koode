@@ -1,6 +1,6 @@
 import { VideoView } from '@livekit/react-native';
 import { Image } from 'expo-image';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
@@ -44,14 +44,16 @@ export default function CallScreen() {
     return () => clearTimeout(t);
   }, [showRemote, chromeVisible]);
 
-  // Show why the call ended for a moment, then close.
+  // Show why the call ended for a moment, then close (this screen, not
+  // whatever happens to be on top).
+  const navigation = useNavigation();
   useEffect(() => {
     if (m.phase !== 'ended') return;
     const t = setTimeout(() => {
-      if (router.canGoBack()) router.back();
+      if (navigation.canGoBack()) navigation.goBack();
     }, 900);
     return () => clearTimeout(t);
-  }, [m.phase]);
+  }, [m.phase, navigation]);
 
   if (!contact) return null;
   const name = contact.displayName;

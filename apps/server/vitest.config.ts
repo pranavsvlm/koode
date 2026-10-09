@@ -1,6 +1,15 @@
+import { generateKeyPairSync } from 'node:crypto';
 import path from 'node:path';
 import { cloudflareTest, readD1Migrations } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
+
+// A throwaway Google service account for FCM tests (the private key never leaves this run).
+const fcmKey = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const FCM_SERVICE_ACCOUNT = JSON.stringify({
+  project_id: 'koode-test',
+  client_email: 'push@koode-test.iam.gserviceaccount.com',
+  private_key: fcmKey.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+});
 
 export default defineConfig({
   plugins: [
@@ -15,6 +24,11 @@ export default defineConfig({
           LIVEKIT_URL: 'wss://livekit.test',
           LIVEKIT_API_KEY: 'test-key',
           LIVEKIT_API_SECRET: 'test-livekit-secret-0123456789abcdef',
+          PUSH_RELAY_URL: 'https://relay.test',
+          PUSH_RELAY_SECRET: 'test-relay-secret-0123456789abcdefghij',
+          FCM_SERVICE_ACCOUNT,
+          // Public half, so tests can verify the OAuth assertion's signature.
+          TEST_FCM_PUBLIC_KEY: fcmKey.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
         },
       },
     })),

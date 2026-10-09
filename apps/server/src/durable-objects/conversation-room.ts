@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { ApiErrorCode, Message, ServerEvent } from '@koode/shared';
 import { MESSAGE_COLUMNS, notifyUsers, toMessage, type MessageRow } from '../messaging/rows';
+import { pushMessage } from '../push/dispatch';
 
 export type RoomResult<T> =
   { ok: true; value: T } | { ok: false; code: ApiErrorCode; message: string };
@@ -17,6 +18,10 @@ export class ConversationRoom extends DurableObject<Env> {
   private loading: Promise<boolean> | null = null;
   private lastSeq = 0;
   private members = new Set<string>();
+  private info: { kind: 'direct' | 'group'; title: string | null } = {
+    kind: 'direct',
+    title: null,
+  };
 
   /** Load the sequence counter and membership once per activation. */
   private load(conversationId: string): Promise<boolean> {
@@ -25,15 +30,16 @@ export class ConversationRoom extends DurableObject<Env> {
     this.loading = (async () => {
       const db = this.env.DB;
       const conv = await db
-        .prepare('SELECT last_seq FROM conversations WHERE id = ?')
+        .prepare('SELECT last_seq, kind, title FROM conversations WHERE id = ?')
         .bind(conversationId)
-        .first<{ last_seq: number }>();
+        .first<{ last_seq: number; kind: 'direct' | 'group'; title: string | null }>();
       if (!conv) return false;
       const { results } = await db
         .prepare('SELECT user_id FROM conversation_members WHERE conversation_id = ?')
         .bind(conversationId)
         .all<{ user_id: string }>();
       this.lastSeq = Math.max(this.lastSeq, conv.last_seq);
+      this.info = { kind: conv.kind, title: conv.title };
       this.members = new Set(results.map((r) => r.user_id));
       return true;
     })().catch((e) => {
@@ -136,6 +142,12 @@ export class ConversationRoom extends DurableObject<Env> {
 
     const message = toMessage(row);
     this.broadcast(this.members, { type: 'message', message });
+    const recipients = [...this.members].filter((u) => u !== input.senderId);
+    this.ctx.waitUntil(
+      pushMessage(this.env, message, this.info, recipients).catch((e: unknown) =>
+        console.error(JSON.stringify({ type: 'push_error', message: String(e) })),
+      ),
+    );
     return { ok: true, value: message };
   }
 

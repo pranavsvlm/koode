@@ -1,0 +1,22 @@
+{
+  "name": "@koode/push-relay",
+  "version": "0.0.0",
+  "private": true,
+  "description": "HTTP/2 relay from the Koode Worker to APNs (Worker fetch can't speak HTTP/2). Holds the APNs signing key.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "APNS_MODE=simulator node --env-file-if-exists=.env src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

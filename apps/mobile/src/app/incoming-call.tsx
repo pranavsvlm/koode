@@ -1,11 +1,12 @@
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar, Text, useToast } from '@/components/ui';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
 import { callController, useCall } from '@/features/calls';
+import { setRingingScreenOpen } from '@/features/calls/incoming';
 import { openConversation } from '@/features/chat/openConversation';
 import { CallControlButton } from '@/features/call/CallControls';
 import { PulseRings } from '@/features/call/PulseRings';
@@ -19,15 +20,26 @@ import { callColors } from '@/theme/tokens';
  * routes incoming calls through CallKit (iOS) / the system call UI (Android).
  */
 export default function IncomingCallScreen() {
-  const { contactId, kind = 'voice' } = useLocalSearchParams<{
-    contactId: string;
-    kind?: CallKind;
-  }>();
-  const contact = useChat((s) => s.contacts[contactId]);
-  const addCall = useChat((s) => s.addCall);
+  const params = useLocalSearchParams<{ contactId: string; kind?: CallKind }>();
   const live = useChat((s) => s.mode === 'live');
   const call = useCall();
+  // Live: always show the call that's ringing now (this screen outlives a
+  // cancelled call if another one rings straight after).
+  const contactId = live && call.call ? call.call.callerId : params.contactId;
+  const kind: CallKind = live && call.call ? call.call.kind : (params.kind ?? 'voice');
+  const contact = useChat((s) => s.contacts[contactId]);
+  const addCall = useChat((s) => s.addCall);
+  const navigation = useNavigation();
+  // Closes this screen (not whatever happens to be on top).
+  const close = useCallback(() => {
+    if (navigation.canGoBack()) navigation.goBack();
+  }, [navigation]);
   const toast = useToast();
+
+  useEffect(() => {
+    setRingingScreenOpen(true);
+    return () => setRingingScreenOpen(false);
+  }, []);
 
   useEffect(() => {
     haptics.press();
@@ -37,11 +49,11 @@ export default function IncomingCallScreen() {
 
   // The caller gave up (or the call was answered on another device): close.
   useEffect(() => {
-    if (live && call.phase === 'ended') {
-      const t = setTimeout(() => router.canGoBack() && router.back(), 600);
+    if (live && (call.phase === 'ended' || call.phase === 'idle')) {
+      const t = setTimeout(close, 600);
       return () => clearTimeout(t);
     }
-  }, [live, call.phase]);
+  }, [live, call.phase, close]);
 
   if (!contact) return null;
 
@@ -53,7 +65,7 @@ export default function IncomingCallScreen() {
   const decline = () => {
     if (live) {
       void callController.decline();
-      router.back();
+      close();
       return;
     }
     addCall({
@@ -64,7 +76,7 @@ export default function IncomingCallScreen() {
       startedAt: Date.now(),
       durationSec: 0,
     });
-    router.back();
+    close();
   };
 
   return (

@@ -1,0 +1,7 @@
+{
+  "name": "koode-calls",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PushKit + CallKit integration for incoming calls (iOS).",
+  "main": "index.ts"
+}

@@ -1,10 +1,14 @@
 import * as Crypto from 'expo-crypto';
 import { router, type Href } from 'expo-router';
+import * as Notifications from 'expo-notifications';
 import { setLogLevel } from 'livekit-client';
+import { KoodeCalls } from '../../modules/koode-calls';
 import { useEffect } from 'react';
 import { useDevSettings } from '@/dev/settings';
 import { callController } from '@/features/calls';
 import { startCall } from '@/features/calls/startCall';
+import { handleResponse, syncPushRegistration } from '@/features/notifications';
+import { ACTION } from '@/features/notifications/policy';
 import { useChat } from '@/stores/chat';
 import { usePreferences, type AppearancePreference } from '@/stores/preferences';
 import { generateRecoveryKey } from '@/features/auth/validation';
@@ -265,6 +269,126 @@ export const CALL_TOUR: Step[] = [
   { name: 'done', run: () => callLog('done') },
 ];
 
+/**
+ * Push notification check against the real server and the push relay in
+ * simulator mode (apps/server/scripts/push-peer.mjs plays "Maya";
+ * the runner script backgrounds and restores the app). The Simulator can't
+ * tap "Allow", so this asks for provisional authorization: notifications are
+ * delivered quietly to Notification Center instead of as banners.
+ */
+const pushLog = (label: string, value?: unknown) =>
+  console.log(`[tour-push] ${label}${value === undefined ? '' : ` ${JSON.stringify(value)}`}`);
+const presented = async () =>
+  (await Notifications.getPresentedNotificationsAsync()).map((n) => ({
+    title: n.request.content.title,
+    body: n.request.content.body,
+    data: n.request.content.data,
+  }));
+const tapPresented = async (
+  type: string,
+  action: string = Notifications.DEFAULT_ACTION_IDENTIFIER,
+) => {
+  const n = (await Notifications.getPresentedNotificationsAsync()).find(
+    (x) => (x.request.content.data as { type?: string })?.type === type,
+  );
+  pushLog(`tap ${type}`, n ? n.request.content.title : 'NONE');
+  if (n) await handleResponse({ notification: n, actionIdentifier: action });
+};
+
+export const PUSH_TOUR: Step[] = [
+  {
+    name: 'register',
+    run: () => {
+      useDevSettings.getState().set({ sampleData: false });
+      usePreferences.getState().set('notificationsAsked', true);
+      Notifications.addNotificationReceivedListener((n) =>
+        pushLog('received', [
+          n.request.content.title,
+          n.request.content.body,
+          n.request.content.data,
+        ]),
+      );
+      void Notifications.requestPermissionsAsync({
+        ios: { allowProvisional: true, allowAlert: true, allowBadge: true, allowSound: true },
+      }).then((p) => {
+        pushLog('permission', p.ios?.status);
+        signIn();
+      });
+    },
+  },
+  {
+    name: 'registered',
+    run: () =>
+      void (async () => {
+        const token = await Notifications.getDevicePushTokenAsync().catch((e: unknown) =>
+          String(e),
+        );
+        pushLog(
+          'alert-token',
+          typeof token === 'string' ? token : `${String(token.data).length} hex chars`,
+        );
+        await syncPushRegistration();
+        pushLog('ready');
+      })(),
+  },
+  { name: 'foreground-message', run: go('/chats') },
+  { name: 'background', run: () => pushLog('background-now') },
+  { name: 'returned', run: () => {} },
+  { name: 'presented', run: () => void presented().then((p) => pushLog('presented', p)) },
+  // "Answer" on the incoming-call notification that arrived in the background.
+  {
+    name: 'answer-from-notification',
+    run: () => {
+      const snap = () => {
+        const s = callController.getSnapshot();
+        return { phase: s.phase, call: s.call?.id, state: s.call?.state, reason: s.endReason };
+      };
+      pushLog('before-answer', snap());
+      void tapPresented('call', ACTION.answer).then(() => pushLog('after-answer', snap()));
+    },
+  },
+  { name: 'in-call', run: () => pushLog('call-state', callController.getSnapshot().phase) },
+  { name: 'hangup', run: () => pushLog('hangup-please') },
+  { name: 'tap-message', run: () => void tapPresented('message') },
+  { name: 'after-tap', run: () => void presented().then((p) => pushLog('presented-after-tap', p)) },
+  { name: 'tap-missed-call', run: () => void tapPresented('missed-call') },
+  {
+    // The native VoIP push handler (the Simulator has no PushKit). iOS reports
+    // the call to CallKit, then ends it: the Simulator can't show the call UI.
+    name: 'callkit-report',
+    run: () => {
+      pushLog('call-me');
+      for (const e of ['reported', 'ignored', 'answer', 'end', 'mute'] as const)
+        KoodeCalls?.addListener(e, (body: unknown) => pushLog(`native ${e}`, body));
+      const unsub = callController.subscribe(() => {
+        const s = callController.getSnapshot();
+        if (s.phase !== 'incoming' || !s.call || !KoodeCalls) return;
+        unsub();
+        void KoodeCalls.simulateVoipPush({
+          aps: {},
+          body: {
+            type: 'call',
+            callId: s.call.id,
+            callerId: s.call.callerId,
+            callerName: 'Maya Chen',
+            kind: s.call.kind,
+          },
+        });
+      });
+    },
+  },
+  {
+    name: 'callkit-ended',
+    run: () =>
+      void (async () =>
+        pushLog('callkit-ended', {
+          phase: callController.getSnapshot().phase,
+          callkit: await KoodeCalls?.activeCallIds(),
+        }))(),
+  },
+  { name: 'done', run: go('/chats') },
+];
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
@@ -284,7 +408,14 @@ export function useDevTour(mode: string | undefined) {
       usePreferences.getState().set('appearance', saved.appearance);
       usePreferences.getState().set('accent', saved.accent);
     };
-    const steps = mode === 'messaging' ? MESSAGING_TOUR : mode === 'calls' ? CALL_TOUR : TOUR;
+    const steps =
+      mode === 'messaging'
+        ? MESSAGING_TOUR
+        : mode === 'calls'
+          ? CALL_TOUR
+          : mode === 'push'
+            ? PUSH_TOUR
+            : TOUR;
     let i = 0;
     const tick = () => {
       const step = steps[i];

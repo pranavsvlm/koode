@@ -22,19 +22,22 @@ validate, not descriptions of working code.
        │ WebRTC                  │ mints short-lived tokens; sends pushes
        ▼                         ▼
 ┌──────────────┐        ┌──────────────────────┐
-│ LiveKit SFU  │        │ APNs (alert + VoIP)  │
-│ (voice/video)│        │ FCM (Android)        │
-└──────────────┘        └──────────────────────┘
+│ LiveKit SFU  │        │ push relay ─► APNs   │
+│ (voice/video)│        │ (alert + VoIP)       │
+└──────────────┘        │ FCM (Android)        │
+                        └──────────────────────┘
 ```
 
 ## Repository layout
 
-| Path              | Purpose                                                              |
-| ----------------- | -------------------------------------------------------------------- |
-| `apps/mobile`     | Expo SDK 57 app (iOS + Android), Expo Router, NativeWind, Zustand    |
-| `apps/server`     | Cloudflare Worker (Hono), Durable Objects, D1 migrations, R2 binding |
-| `packages/shared` | Wire-protocol types and Zod schemas used by both app and server      |
-| `docs/`           | Architecture, setup and release documentation                        |
+| Path                              | Purpose                                                              |
+| --------------------------------- | -------------------------------------------------------------------- |
+| `apps/mobile`                     | Expo SDK 57 app (iOS + Android), Expo Router, NativeWind, Zustand    |
+| `apps/server`                     | Cloudflare Worker (Hono), Durable Objects, D1 migrations, R2 binding |
+| `apps/push-relay`                 | Node HTTP/2 relay to APNs (holds the APNs key; Worker fetch can't)   |
+| `apps/mobile/modules/koode-calls` | Local Expo module (Swift): PushKit + CallKit for incoming calls      |
+| `packages/shared`                 | Wire-protocol types and Zod schemas used by both app and server      |
+| `docs/`                           | Architecture, setup and release documentation                        |
 
 pnpm workspaces with `nodeLinker: hoisted`. React Native native-module autolinking
 and several RN libraries still assume a flat `node_modules`.
@@ -242,22 +245,97 @@ One-to-one voice and video calls. Group calls are not in scope yet.
 - **Hosting:** development uses a local `livekit-server --dev` (no account, no cost).
   LiveKit Cloud or a self-hosted server for real use is **pending your approval**.
 
-## Notifications (planned, Phase 6)
+## Notifications (implemented, Phase 6)
 
-Ordinary push notifications **cannot** reliably deliver incoming calls in the
-background.
+Ordinary push notifications **cannot** reliably ring incoming calls in the
+background, so calls use the platforms' calling channels.
 
-- **iOS:**
-  - Calls use PushKit VoIP pushes. The app must report every VoIP push to CallKit
-    immediately, or iOS will terminate it and stop delivering VoIP pushes.
-  - Messages use standard APNs alerts. Once encryption lands, a Notification Service
-    Extension either decrypts the preview or shows a generic "New message".
-- **Android:** FCM high-priority data messages, plus a self-managed `ConnectionService`
-  or a full-screen-intent notification for incoming calls.
-- **Native modules:** both platforms need native modules and config plugins, so this
-  work requires development builds and a paid Apple Developer account.
-- **Open risk:** APNs requires HTTP/2. Whether Worker `fetch` reaches APNs reliably is
-  unverified. Fallback: a tiny push relay. Test this first in Phase 6.
+### Flow
+
+```
+Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► APNs ──► iPhone
+  (messages: ConversationRoom)│     holds the .p8 key        alert pushes → Notification Center
+  (calls: calls/events.ts,    │                              VoIP pushes  → PushKit → CallKit
+   CallTimer alarm)           └─► FCM HTTP v1 ─────────────► Android (data messages)
+```
+
+- **Why a relay:**
+  - APNs only accepts HTTP/2. Worker `fetch` doesn't negotiate it: from local
+    workerd it fails with "Network connection lost", while `curl --http2` gets
+    APNs' normal 403.
+  - `apps/push-relay` is a small Node service. It holds the APNs signing key
+    (ES256 provider tokens via `jose`, refreshed every 40 minutes) and keeps one
+    HTTP/2 connection per APNs host.
+  - The Worker authenticates to it with a shared bearer secret and never sees the
+    Apple key.
+  - In development the relay runs in **simulator mode**: alert pushes go to a booted
+    Simulator through `xcrun simctl push`, and VoIP pushes are dropped (the
+    Simulator has no PushKit).
+- **FCM:** called directly from the Worker (HTTP/1.1 is fine). It authenticates with
+  a Google service account (OAuth 2.0 JWT-bearer grant, RS256 via `jose`).
+- **Registration:**
+  - Each device registers with `PUT /v1/push`, sending its alert token (APNs/FCM),
+    its PushKit token (iOS) and its notification settings.
+  - The server enforces those settings when sending: direct messages, groups,
+    calls, and previews (message text on/off).
+  - A token belongs to one phone. Registering it moves it off any older device
+    (e.g. a previous account on the same phone).
+  - Sign-out and device removal delete the registration.
+  - Tokens that APNs/FCM reject as dead (`410`, `BadDeviceToken`, `UNREGISTERED`)
+    are forgotten.
+
+### What is sent
+
+| Event              | iOS                                                                                            | Android (data message, rendered by expo-notifications)       |
+| ------------------ | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Message            | Alert: sender (or group), text or "New message", badge = unread, thread = conversation         | `messages` channel, tag = conversation                       |
+| Call rings         | **VoIP push → CallKit**. Without a PushKit token (the Simulator), an alert with Answer/Decline | `calls` channel (max importance), Answer/Decline, tag = call |
+| Call stops ringing | VoIP "call-ended" (CallKit ends it)                                                            | Silent data; the background task removes the notification    |
+| Nobody answered    | Alert "Missed … call", Call Back                                                               | `missed-calls` channel, replaces the ringing notification    |
+
+- **Missed calls:** a per-call `CallTimer` Durable Object alarm marks unanswered calls
+  `missed` at the 45 s timeout and sends the missed-call push, even if the caller's
+  app vanished. The lazy sweep stays as a backstop, with a 15 s grace period.
+- **Payload privacy:** the custom data (`PushData`) never contains message text, only
+  ids. Text appears only in the visible notification, and only if that device allows
+  previews. Until Phase 8 that text passes through Apple's or Google's push service.
+  With E2EE, a Notification Service Extension will decrypt it on the device instead.
+
+### iOS calling (PushKit + CallKit)
+
+- **Native module:** the local Expo module `modules/koode-calls` (Swift).
+  - An app-delegate subscriber registers PushKit at launch, so a VoIP push that
+    wakes a killed app is handled before JavaScript exists.
+  - Every VoIP push is reported to CallKit before the push callback returns (an
+    Apple requirement). Unknown or stale pushes are reported and immediately
+    ended.
+  - A local 50 s safety timeout ends ringing calls whose "stop" push was lost.
+  - Calls stay out of the Phone app's Recents.
+- **Answering and ending:** CallKit actions (answer, end, mute) are queued until
+  JavaScript listens, then drive the call controller (`features/calls/callkit.ts`).
+  The controller's state ends or updates the CallKit call.
+- **Audio:** CallKit activates the audio session; WebRTC is told through
+  `LKRTCAudioSession.audioSessionDidActivate/Deactivate`.
+- **In-app screen:** while the app is open, the in-app ringing screen gives CallKit
+  1.5 s to claim the call before showing itself.
+- **Keychain:** answering from the lock screen needs the session while the phone is
+  locked. Keychain items are therefore "after first unlock, this device only"
+  (migrated once from "when unlocked").
+- **Outgoing calls:** not reported to CallKit yet (in-app only).
+- **Simulator limitation:** the Simulator can't show CallKit's incoming-call UI; iOS
+  ends such calls at once (`facetime://` launch fails). PushKit is therefore not
+  registered on the Simulator, and the server falls back to an alert.
+
+### Android
+
+- **How it rings:** FCM high-priority data messages. expo-notifications renders them
+  on our channels with Answer/Decline buttons.
+- **Background task:** a headless task (defined at the app entry, `index.ts`) handles
+  Decline and "stop ringing" while the app is closed.
+- **Not yet built:**
+  - A full-screen incoming-call UI (`CallStyle` / full-screen intent or a
+    self-managed `ConnectionService`).
+  - All Android push behaviour is untested (no device or emulator; see Known risks).
 
 ## End-to-end encryption (planned, Phase 8)
 
@@ -328,7 +406,8 @@ Planned:
 | Cloudflare R2                | Media                          | Free tier; enabling R2 requires a payment method on the account              |
 | Apple Developer Program      | Push, VoIP, TestFlight         | US$99/year; required from Phase 6                                            |
 | Expo EAS Build               | Android APK, iOS device builds | Free tier has a monthly build quota                                          |
-| Firebase Cloud Messaging     | Android push                   | Free                                                                         |
+| Firebase Cloud Messaging     | Android push                   | Free (needs a Firebase project)                                              |
+| Push relay hosting           | APNs over HTTP/2               | Any small always-on Node host; free tiers exist. Runs locally in development |
 | LiveKit Cloud (or self-host) | Voice and video                | Free tier available; self-hosting needs a server. Local dev server is free.  |
 
 ## Known risks
@@ -338,9 +417,11 @@ Planned:
 2. **No Android hardware or emulator:** Android can only be verified through EAS
    cloud builds plus a device you borrow. Android behaviour will be marked untested
    until then.
-3. **VoIP on iOS:** needs a paid developer account, a real device (the Simulator has
-   no PushKit) and correct CallKit handling.
-4. **APNs from Workers:** HTTP/2 reachability is unverified (see Notifications).
+3. **VoIP on iOS:** needs a paid developer account and a real device. The Simulator
+   can't show CallKit calls, so answering through CallKit and its audio hand-off are
+   unverified until then.
+4. **APNs from Workers:** Worker `fetch` can't speak HTTP/2 (verified locally), so
+   APNs goes through the push relay, which needs hosting before real use.
 5. **iOS 27 scene life cycle:** Expo SDK 57's template doesn't adopt UIScene, which
    iOS 27 requires. A local config plugin (`plugins/withSceneLifecycle.js`) adopts it
    using Expo's own `ExpoAppSceneDelegate`. It is verified on the iOS 27 Simulator.

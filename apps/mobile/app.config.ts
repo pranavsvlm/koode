@@ -14,6 +14,10 @@ const BUNDLE_ID_BASE = 'com.navoasis.koode';
 // Printed by `npx eas-cli init` (not a secret). Required for EAS Build.
 const EAS_PROJECT_ID: string | undefined = undefined;
 
+// Firebase config for Android push (FCM): path to google-services.json. Not
+// committed; an EAS "file" environment variable in cloud builds (docs/SETUP.md).
+const GOOGLE_SERVICES = process.env.GOOGLE_SERVICES_JSON;
+
 const VARIANTS: Record<Variant, { name: string; id: string }> = {
   development: { name: 'Koode Dev', id: `${BUNDLE_ID_BASE}.dev` },
   preview: { name: 'Koode Preview', id: `${BUNDLE_ID_BASE}.preview` },
@@ -33,8 +37,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     bundleIdentifier: VARIANTS[variant].id,
     supportsTablet: false,
     infoPlist: {
-      // Keep call audio running when the app is in the background.
-      UIBackgroundModes: ['audio'],
+      // audio: keep call audio running in the background.
+      // voip: PushKit incoming-call pushes (reported to CallKit).
+      UIBackgroundModes: ['audio', 'voip'],
     },
   },
   android: {
@@ -46,6 +51,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       monochromeImage: './assets/android-icon-monochrome.png',
     },
     predictiveBackGestureEnabled: false,
+    googleServicesFile: GOOGLE_SERVICES,
   },
   web: {
     bundler: 'metro',
@@ -68,7 +74,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-secure-store',
     'expo-sqlite',
     'expo-image',
-    // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
+    // Push: the aps-environment entitlement. Development builds use APNs sandbox;
+    // TestFlight and App Store builds use production.
+    ['expo-notifications', { mode: variant === 'development' ? 'development' : 'production' }],
     // Voice/video calls (LiveKit over WebRTC).
     '@livekit/react-native-expo-plugin',
     [
@@ -78,6 +86,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         microphonePermission: 'Koode uses your microphone for voice and video calls.',
       },
     ],
+    // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
     './plugins/withSceneLifecycle',
     // Dev builds reopen the last Metro server instead of showing the launcher, and
     // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.
@@ -92,6 +101,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   extra: {
     variant,
+    // Must match the aps-environment entitlement above.
+    pushEnvironment: variant === 'development' ? 'sandbox' : 'production',
     eas: EAS_PROJECT_ID ? { projectId: EAS_PROJECT_ID } : undefined,
   },
 });

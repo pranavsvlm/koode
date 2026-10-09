@@ -122,7 +122,7 @@ describe('answering and hanging up', () => {
   it('marks unanswered calls missed after the ring timeout', async () => {
     const { maya, dan } = await twoUsers();
     const { call } = CallJoin.parse((await start(maya.accessToken, dan.user.id)).json);
-    await env.DB.prepare('UPDATE calls SET created_at = created_at - 60000 WHERE id = ?')
+    await env.DB.prepare('UPDATE calls SET created_at = created_at - 120000 WHERE id = ?')
       .bind(call.id)
       .run();
     expect((await api(`/calls/${call.id}`, { token: dan.accessToken })).json.state).toBe('missed');

@@ -7,13 +7,176 @@
 | 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator          |
 | 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator    |
 | 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator    |
-| 6     | Notifications            | ⏳ Awaiting approval                                   |
-| 7     | Media and group features | —                                                      |
+| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator          |
+| 7     | Media and group features | ⏳ Awaiting approval                                   |
 | 8     | Security and E2EE        | —                                                      |
 | 9     | Performance and testing  | —                                                      |
 | 10    | Builds and distribution  | —                                                      |
 
 **E2EE status: not implemented.** Traffic is protected by TLS only.
+
+---
+
+## Phase 6: Notifications (2026-10-09)
+
+Push notifications are **real** for messages, incoming calls and missed calls:
+
+- iOS goes through APNs via a new push relay;
+- Android goes through FCM;
+- iOS incoming calls ring through **PushKit + CallKit**.
+
+Everything ran locally. The relay was in Simulator mode, so no Apple or Firebase
+account was used and nothing was billed. **Real APNs delivery, CallKit answering
+and all of Android are untested** (they need a paid Apple account, a real iPhone,
+and an Android device or a Firebase project; see below).
+**Notification text is not end-to-end encrypted yet (Phase 8).**
+
+### Delivered
+
+- **Investigation:** APNs requires HTTP/2, and Worker `fetch` can't negotiate it.
+  Verified: local workerd fails with "Network connection lost", while
+  `curl --http2` gets APNs' normal 403.
+- **Push relay** (`apps/push-relay`, Node):
+  - holds the APNs .p8 key and signs ES256 provider tokens with `jose`;
+  - keeps HTTP/2 connections to APNs and maps APNs errors back to the Worker;
+  - authenticates the Worker with a bearer secret and logs no tokens or payloads;
+  - **simulator mode** delivers alert pushes to a booted Simulator via
+    `xcrun simctl push`.
+- **Server:**
+  - Migration `0005_push`, and `PUT/DELETE /v1/push`. Apps are allow-listed, the
+    platform must match the device, and a token moves to the newest device that
+    registers it.
+  - Registrations are deleted on sign-out and device removal; dead tokens are
+    forgotten.
+  - Dispatch rules for messages (sender or group name, text only if previews are
+    on, unread badge) and calls (ring, stop ringing, missed). Per-device settings
+    are enforced.
+  - FCM HTTP v1 client (service-account OAuth, RS256 via `jose`).
+  - `CallTimer` Durable Object: an alarm marks unanswered calls missed and sends the
+    missed-call push, even if the caller vanished.
+- **iOS native module** (`modules/koode-calls`, Swift):
+  - PushKit is registered at launch.
+  - Every VoIP push is reported to CallKit before returning (an Apple requirement);
+    stale pushes are reported and ended.
+  - CallKit answer, end and mute are queued until JavaScript listens.
+  - The CallKit audio session is handed to WebRTC.
+  - Calls stay out of Recents; a 50 s local ring safety timeout.
+- **App:**
+  - **Push:** expo-notifications with raw APNs/FCM tokens (not Expo's push
+    service). The permission prompt is asked once, and registration stays in sync
+    with tokens and settings.
+  - **Taps:** they open the chat, the Calls tab, or the incoming call; Answer,
+    Decline and Call Back actions; also when the tap launched the app.
+  - **Foreground:** no banner for the chat on screen; ringing is shown in-app.
+  - **Badge:** the badge shows unread messages; a chat's notifications clear when
+    it's opened.
+  - **Android:** channels (messages, calls, missed calls) and a headless background
+    task for Decline and "stop ringing".
+  - **CallKit bridge:** connects CallKit to the call controller; the in-app ringing
+    screen gives CallKit 1.5 s to claim a call.
+  - **Settings → Notifications:** real permission status (Turn On / Open Settings),
+    and a "Show Message Text" switch replacing the three-way preview option (the
+    phone's lock-screen setting decides what shows while locked).
+- **Keychain:**
+  - Auth secrets are now "after first unlock, this device only", so a call can be
+    answered from the lock screen.
+  - Items are migrated once, and never synced or restored to another device.
+- **Dev tooling:** the `push` tour mode, `scripts/push-peer.mjs`, and route logging
+  during tours.
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                                           | Result                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| TypeScript, ESLint, Prettier (all packages)                                                                                                                                                                                                                                                     | ✅ Pass                 |
+| Shared schema tests                                                                                                                                                                                                                                                                             | ✅ 31/31                |
+| Push relay tests against a local HTTP/2 APNs stand-in (ES256 token verified with the public key, headers, token reuse, 410 pass-through, auth, size and format rejection, simulator mode)                                                                                                       | ✅ 6/6                  |
+| Server tests (15 new: registration rules, token moves, sign-out cleanup, message payloads, previews off, muted types, group naming, FCM payload + signed OAuth assertion, dead-token cleanup, VoIP ring, alert fallback, stop + missed, answered device skipped, alarm → missed, calls setting) | ✅ 71/71                |
+| A deliberately broken previews rule makes the server tests fail                                                                                                                                                                                                                                 | ✅                      |
+| Mobile tests (19 new: notification policy, registrar, keystore migration, CallKit bridge with a fake native module)                                                                                                                                                                             | ✅ 163/163              |
+| iOS native build with the PushKit/CallKit module                                                                                                                                                                                                                                                | ✅                      |
+| **Push E2E on the Simulator: two accounts, local Worker, relay in simulator mode** (repeated runs)                                                                                                                                                                                              | ✅ Logs and screenshots |
+| App open: the message notification is received with the right data                                                                                                                                                                                                                              | ✅                      |
+| App in the background: message, missed call and "Incoming video call" all delivered                                                                                                                                                                                                             | ✅                      |
+| "Answer" on the incoming-call notification → the call screen opens and the server shows the call `active`                                                                                                                                                                                       | ✅                      |
+| Tapping the message notification opens the chat and clears its notifications; the missed-call tap opens Calls (history: "Missed voice call")                                                                                                                                                    | ✅                      |
+| App closed: the message is delivered and listed when the app reopens                                                                                                                                                                                                                            | ✅                      |
+| The native VoIP handler reports to CallKit ("reported incoming: ok"); the system's end action reaches the app, which declines on the server                                                                                                                                                     | ✅                      |
+| Phase 5 call test re-run after the call-screen changes                                                                                                                                                                                                                                          | ✅                      |
+
+Bugs found by these tests and fixed:
+
+- **Missed calls:** a lazy expiry could beat the missed-call push. The alarm now
+  sends it, and the sweep has a grace period.
+- **Category id:** Expo forbids `-` in notification category ids (`missed_call`).
+- **Swift DSL:** the module used `.runOnQueue` on plain `Function`s; it now
+  dispatches to main explicitly.
+- **Relay 413:** an oversized request closed the socket before the 413 was sent.
+- **Notification dismissal:** when a call stopped ringing, its missed-call
+  notification was removed too.
+- **Stacked call screens:** answering from a notification stacked the call screen on
+  the ringing screen. Closing both left a black screen, or a stale ringing screen
+  for an earlier call. The call screen now replaces the ringing screen, screens
+  close themselves (not "whatever is on top"), and only one ringing screen exists
+  at a time.
+- **Sign-out:** notifications and the badge from a signed-out account weren't
+  always cleared.
+- **Simulator VoIP token:** PushKit hands out a token on the Simulator, but CallKit
+  can't ring there. PushKit is now skipped on the Simulator, so calls fall back to
+  an alert.
+
+### Not verified
+
+- **Real APNs** (needs the paid Apple Developer account and an APNs key):
+  - real alert and VoIP delivery;
+  - production vs. sandbox;
+  - the relay's HTTP/2 path against Apple itself (it is tested against a local
+    HTTP/2 stand-in).
+- **CallKit on a real iPhone:**
+  - the system incoming-call screen, answering or declining from the lock screen;
+  - audio hand-off to WebRTC, mute sync, Bluetooth;
+  - launch from a killed state. The Simulator ends CallKit calls immediately (it
+    has no in-call UI).
+- **Banners and sounds:** the Simulator can't tap "Allow", so tests used
+  _provisional_ permission, which delivers quietly to Notification Center. Banner
+  presentation with full permission wasn't seen.
+- **Real taps on notifications and action buttons:** the tour fed delivered
+  notifications through the same handler.
+- **All of Android:** FCM delivery, channels, action buttons, the headless
+  background task, badges. There's no device, emulator or Firebase project; only the
+  server's FCM requests are tested.
+- Badge counts on a real home screen; Focus / Do Not Disturb behaviour.
+
+### Known issues and limitations
+
+- **Not end-to-end encrypted:** with previews on, message text passes through
+  Apple's or Google's push service.
+- **Lock-screen previews:** "Show Message Text" is on/off only; the phone's own
+  setting decides what shows on the lock screen.
+- **Android:** no full-screen incoming-call UI; incoming calls are a high-priority
+  notification with Answer/Decline.
+- **Outgoing calls** aren't reported to CallKit (no system call UI or Bluetooth
+  routing for them yet).
+- **Keychain:** "after first unlock" makes secrets readable while the phone is
+  locked (needed to answer calls); still device-only.
+- **Background modes:** iOS lists `audio`, `voip` and `fetch`. `fetch` comes from a
+  plugin; review it in Phase 10.
+- **Repeat notifications:** each message replaces the conversation's Android
+  notification (tag); iOS groups them by thread.
+
+### Manual configuration required
+
+- **Development (done on this Mac):**
+  - Migration 0005 is applied.
+  - `.dev.vars` has `PUSH_RELAY_URL` and `PUSH_RELAY_SECRET`.
+  - The relay runs with `APNS_MODE=simulator`; the native app has been rebuilt.
+- **Before real use (your decision and approval):**
+  - **Apple Developer Program** (US$99/year): push capability for each app id, and
+    an APNs auth key (.p8) for the relay.
+  - **Host the push relay** (any small always-on Node host); it holds the .p8 key.
+  - **Firebase:** a project, `google-services.json` (EAS file env var
+    `GOOGLE_SERVICES_JSON`), and a service account in the Worker secret
+    `FCM_SERVICE_ACCOUNT`.
 
 ---
 

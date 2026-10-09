@@ -21,6 +21,8 @@ export type Preferences = {
   callNotifications: boolean;
   notificationPreview: NotificationPreview;
   inAppSounds: boolean;
+  /** The system notification prompt has been shown once (never nag). */
+  notificationsAsked: boolean;
 };
 
 type PreferencesState = Preferences & {
@@ -41,6 +43,7 @@ export const DEFAULT_PREFERENCES: Preferences = {
   callNotifications: true,
   notificationPreview: 'always',
   inAppSounds: true,
+  notificationsAsked: false,
 };
 
 /**

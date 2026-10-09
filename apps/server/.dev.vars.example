@@ -14,5 +14,13 @@ LIVEKIT_URL=ws://localhost:7880
 LIVEKIT_API_KEY=devkey
 LIVEKIT_API_SECRET=secret
 
-# Introduced in later phases:
-#   Phase 6: APNS_*, FCM_*
+# Push notifications. APNs is sent through the push relay (apps/push-relay),
+# because APNs needs HTTP/2, which Worker fetch doesn't speak. The relay holds
+# the Apple key; this secret authenticates the Worker to it (≥32 random bytes,
+# same value as the relay's RELAY_SECRET). Leave PUSH_RELAY_URL empty to skip APNs.
+PUSH_RELAY_URL=http://localhost:8790
+PUSH_RELAY_SECRET=
+
+# Android (FCM HTTP v1): the Firebase service account JSON on one line.
+# Leave empty to skip Android pushes.
+FCM_SERVICE_ACCOUNT=

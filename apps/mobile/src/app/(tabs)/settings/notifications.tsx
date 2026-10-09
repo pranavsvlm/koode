@@ -1,28 +1,48 @@
-import { ScrollView, View } from 'react-native';
-import { Icon, ListRow, ListSection, Text } from '@/components/ui';
-import { usePreferences, type NotificationPreview } from '@/stores/preferences';
-
-const PREVIEW: { value: NotificationPreview; label: string }[] = [
-  { value: 'always', label: 'Always' },
-  { value: 'unlocked', label: 'When Unlocked' },
-  { value: 'never', label: 'Never' },
-];
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useState } from 'react';
+import { Linking, ScrollView, View } from 'react-native';
+import { Button, Icon, ListRow, ListSection, Text } from '@/components/ui';
+import { notificationsAllowed, requestNotificationPermission } from '@/features/notifications';
+import { usePreferences } from '@/stores/preferences';
 
 export default function NotificationsScreen() {
   const p = usePreferences();
+  const [allowed, setAllowed] = useState<boolean | null>(null);
+
+  // Re-check when returning from the system Settings app.
+  useFocusEffect(
+    useCallback(() => {
+      void notificationsAllowed().then(setAllowed);
+    }, []),
+  );
+
+  const turnOn = async () => {
+    // iOS shows its prompt only once; after that only Settings can change it.
+    if (!p.notificationsAsked) setAllowed(await requestNotificationPermission());
+    else void Linking.openSettings();
+  };
 
   return (
     <ScrollView className="bg-background" contentContainerClassName="gap-7 px-4 pb-16 pt-4">
-      <View className="flex-row gap-3 rounded-xl bg-surface p-4">
-        <Icon name="bell" size={20} color="accent" />
-        <View className="flex-1 gap-1">
-          <Text variant="headline">Push notifications arrive in Phase 6</Text>
-          <Text variant="footnote" tone="secondary">
-            These preferences are saved now and will apply once notifications are connected.
-            Incoming calls will use the system call screen.
-          </Text>
+      {allowed === false && (
+        <View className="gap-3 rounded-xl bg-surface p-4">
+          <View className="flex-row gap-3">
+            <Icon name="bell" size={20} color="accent" />
+            <View className="flex-1 gap-1">
+              <Text variant="headline">Notifications are off</Text>
+              <Text variant="footnote" tone="secondary">
+                You won’t hear about new messages or missed calls while Koode is closed. Incoming
+                calls still ring on iPhone.
+              </Text>
+            </View>
+          </View>
+          <Button
+            label={p.notificationsAsked ? 'Open Settings' : 'Turn On Notifications'}
+            size="md"
+            onPress={() => void turnOn()}
+          />
         </View>
-      </View>
+      )}
 
       <ListSection title="Messages">
         <ListRow
@@ -44,20 +64,23 @@ export default function NotificationsScreen() {
       </ListSection>
 
       <ListSection
-        title="Show Previews"
-        footer="Choose when message text appears in notifications."
+        title="Privacy"
+        footer="When off, notifications only say “New message”. Your phone’s lock-screen settings decide what shows while it’s locked. Until end-to-end encryption arrives, notification text passes through Apple’s or Google’s push service."
       >
-        {PREVIEW.map((o) => (
-          <ListRow
-            key={o.value}
-            title={o.label}
-            accessory={{ type: 'check', checked: p.notificationPreview === o.value }}
-            onPress={() => p.set('notificationPreview', o.value)}
-          />
-        ))}
+        <ListRow
+          title="Show Message Text"
+          accessory={{
+            type: 'switch',
+            value: p.notificationPreview !== 'never',
+            onValueChange: (v) => p.set('notificationPreview', v ? 'always' : 'never'),
+          }}
+        />
       </ListSection>
 
-      <ListSection title="Calls">
+      <ListSection
+        title="Calls"
+        footer="On iPhone, incoming calls use the system call screen, even when the phone is locked."
+      >
         <ListRow
           title="Incoming Calls"
           accessory={{

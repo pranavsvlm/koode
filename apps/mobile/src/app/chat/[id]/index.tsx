@@ -1,4 +1,4 @@
-import { router, Stack, useLocalSearchParams } from 'expo-router';
+import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -16,6 +16,7 @@ import { conversationTitle, directContactId, useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import { startCall } from '@/features/calls/startCall';
+import { setViewingConversation } from '@/features/notifications';
 
 const EMPTY: Message[] = [];
 
@@ -43,6 +44,14 @@ export default function ConversationScreen() {
   useEffect(() => {
     markRead(id);
   }, [id, messages.length, markRead]);
+
+  // No banners for the conversation on screen; clear the ones already shown.
+  useFocusEffect(
+    useCallback(() => {
+      setViewingConversation(id);
+      return () => setViewingConversation(null);
+    }, [id]),
+  );
 
   const nameOf = useCallback(
     (userId: string) => (userId === ME ? 'You' : (contacts[userId]?.displayName ?? 'Unknown')),

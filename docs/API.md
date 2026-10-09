@@ -78,6 +78,38 @@ for that call's room only (10 minutes; may publish microphone and camera only).
 States: `ringing`, `active`, `ended`, `declined`, `cancelled`, `missed`. Unanswered
 calls become `missed` after 45 seconds.
 
+## Push notifications
+
+| Method | Path       | Auth | Purpose                                                    |
+| ------ | ---------- | ---- | ---------------------------------------------------------- |
+| PUT    | `/v1/push` | 🔒   | Register this device for pushes (replaces any earlier one) |
+| DELETE | `/v1/push` | 🔒   | Stop all pushes to this device                             |
+
+`PUT` body:
+
+```jsonc
+// iOS
+{ "platform": "ios", "appId": "com.navoasis.koode.dev", "environment": "sandbox",
+  "alertToken": "<APNs hex> | null", "voipToken": "<PushKit hex> | null",
+  "settings": { "directMessages": true, "groupMessages": true, "calls": true, "previews": true } }
+// Android
+{ "platform": "android", "appId": "com.navoasis.koode.dev", "alertToken": "<FCM token> | null",
+  "settings": { … } }
+```
+
+- **Validation:** `appId` must be in the server's `PUSH_APP_IDS`, and `platform`
+  must match the device.
+- **Token ownership:** registering a token removes it from any other device.
+- **Removal:** sign-out and device removal delete the registration.
+- **Push data:** every push carries data (`content.data` in the app) of one of these
+  shapes:
+  - `{type:'message', conversationId, messageId}`
+  - `{type:'call', callId, callerId, callerName, kind}`
+  - `{type:'call-ended', callId}`
+  - `{type:'missed-call', callId, callerId}`
+- **No message text in data:** it appears only in the visible notification text,
+  and only when `previews` is on.
+
 ### Realtime protocol (JSON text frames)
 
 **Server → client:**

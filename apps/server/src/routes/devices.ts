@@ -67,6 +67,7 @@ export const devices = new Hono<AppEnv>()
       db
         .prepare('UPDATE sessions SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL')
         .bind(now, target),
+      db.prepare('DELETE FROM push_registrations WHERE device_id = ?').bind(target),
       auditStatement(db, 'device_revoked', { userId, deviceId }, { target }),
     ]);
     c.executionCtx.waitUntil(
