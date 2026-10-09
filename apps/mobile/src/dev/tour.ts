@@ -1,7 +1,10 @@
 import * as Crypto from 'expo-crypto';
 import { router, type Href } from 'expo-router';
+import { setLogLevel } from 'livekit-client';
 import { useEffect } from 'react';
 import { useDevSettings } from '@/dev/settings';
+import { callController } from '@/features/calls';
+import { startCall } from '@/features/calls/startCall';
 import { useChat } from '@/stores/chat';
 import { usePreferences, type AppearancePreference } from '@/stores/preferences';
 import { generateRecoveryKey } from '@/features/auth/validation';
@@ -194,6 +197,74 @@ export const MESSAGING_TOUR: Step[] = [
   },
 ];
 
+/**
+ * Two-party calling check against the real server and a local LiveKit. A peer
+ * script (apps/server/scripts/call-peer.mjs) plays "Maya": it calls this
+ * account, joins the media room with the LiveKit CLI, hangs up, then declines
+ * a call from here. Steps invoke the same handlers as the on-screen buttons.
+ */
+let callPeer = '';
+const callLog = (label: string) => {
+  const s = callController.getSnapshot();
+  console.log(
+    `[tour-call] ${label} ${JSON.stringify({ phase: s.phase, endReason: s.endReason, call: s.call?.state, kind: s.kind, mic: s.micOn, remote: s.remotePresent })}`,
+  );
+};
+const logCalls = () =>
+  console.log(
+    `[tour-call] history ${JSON.stringify(useChat.getState().calls.map((c) => [c.direction, c.kind, c.outcome, c.durationSec]))}`,
+  );
+
+export const CALL_TOUR: Step[] = [
+  {
+    name: 'register',
+    run: () => {
+      useDevSettings.getState().set({ sampleData: false });
+      setLogLevel('info');
+      signIn();
+    },
+  },
+  { name: 'wait-for-peer', run: () => {} },
+  { name: 'chats-live', run: () => (go('/chats')(), console.log('[tour-call] ready')) },
+  { name: 'incoming', run: () => callLog('incoming') },
+  {
+    name: 'accept',
+    run: () => {
+      // Same as the Accept button on the incoming call screen.
+      const s = callController.getSnapshot();
+      callPeer = s.peerId ?? '';
+      void callController.accept();
+      router.replace({
+        pathname: '/call/[id]',
+        params: { id: callPeer, kind: s.kind, accepted: '1' },
+      });
+      console.log('[tour-call] accepted');
+    },
+  },
+  { name: 'connecting', run: () => callLog('after-accept') },
+  { name: 'connected', run: () => callLog('connected') },
+  {
+    name: 'muted',
+    run: () => void callController.toggleMic().then(() => callLog('muted')),
+  },
+  { name: 'peer-hangup', run: () => console.log('[tour-call] hangup-please') },
+  { name: 'after-hangup', run: () => callLog('after-hangup') },
+  { name: 'calls-tab', run: () => (go('/calls')(), setTimeout(logCalls, 1500)) },
+  {
+    name: 'outgoing',
+    shotAtMs: 1500,
+    run: () => {
+      startCall(callPeer, 'voice');
+      setTimeout(() => callLog('outgoing'), 1000);
+    },
+  },
+  { name: 'ringing', run: () => callLog('ringing') },
+  { name: 'still-ringing', run: () => callLog('still-ringing') },
+  { name: 'declined', run: () => callLog('declined') },
+  { name: 'calls-history', run: () => (go('/calls')(), setTimeout(logCalls, 1500)) },
+  { name: 'done', run: () => callLog('done') },
+];
+
 export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
@@ -203,7 +274,8 @@ export function useDevTour(mode: string | undefined) {
     void useSession.getState().signOut();
     const prefs = usePreferences.getState();
     const saved = { appearance: prefs.appearance, accent: prefs.accent };
-    if (mode !== 'messaging') useDevSettings.getState().set({ sampleData: true });
+    if (mode !== 'messaging' && mode !== 'calls')
+      useDevSettings.getState().set({ sampleData: true });
     if (mode === 'light' || mode === 'dark') {
       prefs.set('appearance', mode as AppearancePreference);
       prefs.set('accent', 'blue');
@@ -212,7 +284,7 @@ export function useDevTour(mode: string | undefined) {
       usePreferences.getState().set('appearance', saved.appearance);
       usePreferences.getState().set('accent', saved.accent);
     };
-    const steps = mode === 'messaging' ? MESSAGING_TOUR : TOUR;
+    const steps = mode === 'messaging' ? MESSAGING_TOUR : mode === 'calls' ? CALL_TOUR : TOUR;
     let i = 0;
     const tick = () => {
       const step = steps[i];

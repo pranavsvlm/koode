@@ -58,6 +58,21 @@ pnpm dev:server
 
 Check it: `curl http://localhost:8787/health` should return `{"status":"ok",…}`.
 
+### Calls: local LiveKit server
+
+Voice and video need a LiveKit server. For development, run the free open-source
+server locally. No account is needed.
+
+```sh
+brew install livekit livekit-cli
+livekit-server --dev --bind 0.0.0.0     # ws://localhost:7880, key "devkey", secret "secret"
+```
+
+`.dev.vars.example` already points the Worker at it (`LIVEKIT_URL`,
+`LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`). Restart `wrangler dev` after changing
+`.dev.vars`. On a physical phone, set `LIVEKIT_URL` to your Mac's LAN address
+(`ws://192.168.x.x:7880`) instead of `localhost`.
+
 ### Create the first account
 
 Koode is invite-only, so the very first invite comes from a script:
@@ -113,6 +128,29 @@ node ../server/scripts/peer.mjs <peer code without dashes> <path to Metro's log>
 The peer ("Maya", a Node client) starts a chat with the account the app registers,
 reads the app's message, types and replies. The app logs the final conversation as
 `[tour-msg] final …`.
+
+### Two-person call check
+
+With the local LiveKit server running:
+
+```sh
+cd apps/mobile
+EXPO_PUBLIC_DEV_TOUR=calls EXPO_PUBLIC_DEV_TOUR_INVITE=<app code> npx expo start --dev-client
+node ../server/scripts/call-peer.mjs <peer code without dashes> <path to Metro's log>
+```
+
+1. The peer ("Maya") video-calls the app. The tour accepts using the Accept button's
+   handler.
+2. The peer joins the room with `lk room join --publish-demo`, so the app shows a
+   demo video, then lists the room's participants.
+3. The peer hangs up.
+4. The app then calls the peer, who declines.
+
+The app logs `[tour-call] …` snapshots and the Calls history; the peer prints the
+server's view. Grant the microphone first
+(`xcrun simctl privacy booted grant microphone com.navoasis.koode.dev`), otherwise the
+permission prompt stops the app from publishing audio. The Simulator's camera sends
+black frames.
 
 ### Reviewing every screen without tapping
 

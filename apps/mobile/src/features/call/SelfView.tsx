@@ -1,4 +1,6 @@
+import { VideoView } from '@livekit/react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import type { VideoTrack } from 'livekit-client';
 import { useWindowDimensions } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
@@ -15,7 +17,21 @@ const MARGIN = 16;
  * corner on release, like FaceTime. Shows a placeholder until the camera
  * pipeline lands in Phase 5.
  */
-export function SelfView({ cameraOn, bottomInset }: { cameraOn: boolean; bottomInset: number }) {
+export function SelfView({
+  cameraOn,
+  bottomInset,
+  track,
+  mirror = true,
+  unavailable = false,
+}: {
+  cameraOn: boolean;
+  bottomInset: number;
+  /** Live camera track; without one a placeholder is shown. */
+  track?: VideoTrack;
+  /** Mirror the front camera, as people expect from a selfie view. */
+  mirror?: boolean;
+  unavailable?: boolean;
+}) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const minX = MARGIN;
@@ -67,21 +83,31 @@ export function SelfView({ cameraOn, bottomInset }: { cameraOn: boolean; bottomI
           },
         ]}
       >
-        <LinearGradient
-          colors={cameraOn ? ['#3A4A6B', '#1B2236'] : ['#24272E', '#15171C']}
-          style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 6 }}
-        >
-          <Icon
-            name={cameraOn ? 'person' : 'video-off'}
-            size={cameraOn ? 44 : 26}
-            color="rgba(255,255,255,0.7)"
+        {cameraOn && track ? (
+          <VideoView
+            videoTrack={track}
+            style={{ flex: 1 }}
+            objectFit="cover"
+            mirror={mirror}
+            zOrder={1}
           />
-          {!cameraOn && (
-            <Text variant="caption" style={{ color: 'rgba(255,255,255,0.7)' }}>
-              Camera off
-            </Text>
-          )}
-        </LinearGradient>
+        ) : (
+          <LinearGradient
+            colors={cameraOn ? ['#3A4A6B', '#1B2236'] : ['#24272E', '#15171C']}
+            style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 6 }}
+          >
+            <Icon
+              name={cameraOn ? 'person' : 'video-off'}
+              size={cameraOn ? 44 : 26}
+              color="rgba(255,255,255,0.7)"
+            />
+            {(!cameraOn || unavailable) && (
+              <Text variant="caption" style={{ color: 'rgba(255,255,255,0.7)' }}>
+                {unavailable ? 'No camera' : 'Camera off'}
+              </Text>
+            )}
+          </LinearGradient>
+        )}
       </Animated.View>
     </GestureDetector>
   );

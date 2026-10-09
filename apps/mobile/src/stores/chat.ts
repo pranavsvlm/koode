@@ -1,4 +1,4 @@
-import type { ConversationSummary as ServerConversation } from '@koode/shared';
+import type { Call, ConversationSummary as ServerConversation } from '@koode/shared';
 import { create } from 'zustand';
 import { buildFixtures, CANNED_REPLIES } from '@/dev/fixtures';
 import { useDevSettings } from '@/dev/settings';
@@ -12,6 +12,7 @@ import {
   type MessageStatus,
   type Reaction,
 } from '@/domain/types';
+import { callApi, callController, setCallIdentity } from '@/features/calls';
 import {
   clearMessageCache,
   createMessagingEngine,
@@ -69,6 +70,8 @@ type ChatState = {
   setMuted: (conversationId: string, muted: boolean) => void;
   createConversation: (memberIds: string[], title?: string) => Promise<string>;
   addCall: (call: Omit<CallRecord, 'id'>) => void;
+  /** Live mode: reload call history from the server. */
+  refreshCalls: () => Promise<void>;
 };
 
 let counter = 0;
@@ -215,17 +218,29 @@ export const useChat = create<ChatState>((set, get) => {
         engine = null;
       }
       engineMe = me;
-      engine ??= createMessagingEngine(me, () => void get().unload());
+      setCallIdentity(me);
+      engine ??= createMessagingEngine(
+        me,
+        () => void get().unload(),
+        (call) => {
+          callController.onServerCall(call);
+          // Keep the Calls tab current as calls start and finish.
+          if (call.state !== 'ringing') void get().refreshCalls();
+        },
+      );
       unsubscribe?.();
       unsubscribe = engine.subscribe(refreshLive);
       set({ mode: 'live', calls: [] });
       await engine.start();
+      void get().refreshCalls();
       if (slowLoading) await new Promise((r) => setTimeout(r, 1500));
       refreshLive();
       set({ status: 'ready' });
     },
 
     unload: async () => {
+      void callController.hangUp();
+      setCallIdentity(null);
       unsubscribe?.();
       unsubscribe = null;
       if (engine) await engine.reset();
@@ -350,7 +365,21 @@ export const useChat = create<ChatState>((set, get) => {
       return sampleCreate(set, get, others, title);
     },
 
-    addCall: (call) => set((s) => ({ calls: [{ id: localId('call'), ...call }, ...s.calls] })),
+    addCall: (call) => {
+      // Live calls are recorded by the server; only sample mode keeps local history.
+      if (get().mode === 'sample')
+        set((s) => ({ calls: [{ id: localId('call'), ...call }, ...s.calls] }));
+    },
+
+    refreshCalls: async () => {
+      if (get().mode !== 'live' || !engineMe) return;
+      try {
+        const me = engineMe;
+        set({ calls: (await callApi.list()).map((c) => toCallRecord(c, me)) });
+      } catch {
+        // offline: keep what we have
+      }
+    },
   };
 });
 
@@ -367,6 +396,31 @@ usePreferences.subscribe((p, prev) => {
     );
   }
 });
+
+/** Server call → history row from my point of view. */
+export function toCallRecord(c: Call, me: string): CallRecord {
+  const outgoing = c.callerId === me;
+  const outcome: CallRecord['outcome'] =
+    c.state === 'ended' || c.state === 'active'
+      ? 'answered'
+      : c.state === 'cancelled'
+        ? outgoing
+          ? 'cancelled'
+          : 'missed'
+        : c.state === 'ringing'
+          ? 'missed'
+          : c.state;
+  return {
+    id: c.id,
+    contactId: outgoing ? c.calleeId : c.callerId,
+    kind: c.kind,
+    direction: outgoing ? 'outgoing' : 'incoming',
+    outcome,
+    startedAt: c.createdAt,
+    durationSec:
+      c.answeredAt && c.endedAt ? Math.max(0, Math.round((c.endedAt - c.answeredAt) / 1000)) : 0,
+  };
+}
 
 // ——— Sample mode (design review only) ———
 

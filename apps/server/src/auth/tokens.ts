@@ -6,6 +6,14 @@ export const REFRESH_ABSOLUTE_TTL_MS = 180 * 24 * 60 * 60_000;
 export const CHALLENGE_TTL_MS = 2 * 60_000;
 
 const ISSUER = 'koode';
+
+/** Refuse to sign or verify with a missing or weak secret (misconfiguration guard). */
+function signingSecret(env: Env): string {
+  const secret = env.AUTH_TOKEN_SECRET;
+  if (!secret || secret.length < 32)
+    throw new Error('AUTH_TOKEN_SECRET is missing or shorter than 32 characters');
+  return secret;
+}
 const ALG = 'HS256';
 
 export type AccessClaims = { userId: string; deviceId: string; sessionId: string };
@@ -25,7 +33,7 @@ export async function issueAccessToken(
       iat: Math.floor(now / 1000),
       exp: Math.floor(exp / 1000),
     },
-    env.AUTH_TOKEN_SECRET,
+    signingSecret(env),
     ALG,
   );
   return { accessToken, accessTokenExpiresAt: exp };
@@ -35,7 +43,7 @@ export async function issueAccessToken(
 export async function verifyAccessToken(env: Env, token: string): Promise<AccessClaims | null> {
   try {
     // The algorithm is pinned: tokens claiming any other `alg` are rejected.
-    const payload = await verify(token, env.AUTH_TOKEN_SECRET, { alg: ALG, iss: ISSUER });
+    const payload = await verify(token, signingSecret(env), { alg: ALG, iss: ISSUER });
     const { sub, did, sid } = payload as Record<string, unknown>;
     if (typeof sub !== 'string' || typeof did !== 'string' || typeof sid !== 'string') return null;
     return { userId: sub, deviceId: did, sessionId: sid };

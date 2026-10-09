@@ -15,8 +15,24 @@ const LABEL: Record<CallPhase, string> = {
 };
 
 /** Status line under the caller's name: phase text, or the running timer. */
-export function CallStatus({ phase, seconds }: { phase: CallPhase; seconds: number }) {
-  const text = phase === 'connected' ? formatDuration(seconds) : LABEL[phase];
+export function CallStatus({
+  phase,
+  seconds,
+  endedLabel,
+  weak,
+}: {
+  phase: CallPhase;
+  seconds: number;
+  endedLabel?: string;
+  /** Connected but the other side's connection is poor. */
+  weak?: boolean;
+}) {
+  const text =
+    phase === 'connected'
+      ? `${formatDuration(seconds)}${weak ? ' · Weak connection' : ''}`
+      : phase === 'ended' && endedLabel
+        ? endedLabel
+        : LABEL[phase];
   return (
     <View className="flex-row items-center gap-1.5" accessibilityLiveRegion="polite">
       {phase === 'reconnecting' && <Icon name="signal-weak" size={14} color="#F5B83D" />}

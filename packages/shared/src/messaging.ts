@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { Call } from './calls';
 
 /** Client-generated message id (UUID v4). Makes sends idempotent across retries. */
 export const MessageId = z
@@ -107,6 +108,8 @@ export const ServerEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('typing'), conversationId: z.string(), userId: z.string() }),
   /** A conversation you belong to was created or changed: re-sync it. */
   z.object({ type: z.literal('conversation'), conversationId: z.string() }),
+  /** A call you're part of was created or changed state. */
+  z.object({ type: z.literal('call'), call: Call }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 

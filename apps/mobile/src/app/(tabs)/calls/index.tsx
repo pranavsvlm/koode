@@ -13,6 +13,7 @@ import {
 import type { CallRecord } from '@/domain/types';
 import { formatCallLength, formatConversationTime } from '@/lib/format';
 import { useChat } from '@/stores/chat';
+import { startCall } from '@/features/calls/startCall';
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -84,12 +85,7 @@ export default function CallsScreen() {
           return (
             <View className="flex-row items-center gap-3 pl-4">
               <Pressable
-                onPress={() =>
-                  router.push({
-                    pathname: '/call/[id]',
-                    params: { id: contact.id, kind: item.kind },
-                  })
-                }
+                onPress={() => startCall(contact.id, item.kind)}
                 accessibilityRole="button"
                 accessibilityLabel={`${contact.displayName}, ${describe(item)}, ${formatConversationTime(item.startedAt)}. Double tap to call back.`}
                 className="flex-1 flex-row items-center gap-3 active:opacity-70"

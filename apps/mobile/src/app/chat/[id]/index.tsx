@@ -15,6 +15,7 @@ import { detailOptions } from '@/navigation/options';
 import { conversationTitle, directContactId, useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
 import { useThemeColors } from '@/theme/ThemeProvider';
+import { startCall } from '@/features/calls/startCall';
 
 const EMPTY: Message[] = [];
 
@@ -142,17 +143,13 @@ export default function ConversationScreen() {
                 <IconButton
                   icon="video"
                   accessibilityLabel={`Video call ${title}`}
-                  onPress={() =>
-                    router.push({ pathname: '/call/[id]', params: { id: otherId, kind: 'video' } })
-                  }
+                  onPress={() => startCall(otherId, 'video')}
                   size={38}
                 />
                 <IconButton
                   icon="phone"
                   accessibilityLabel={`Call ${title}`}
-                  onPress={() =>
-                    router.push({ pathname: '/call/[id]', params: { id: otherId, kind: 'voice' } })
-                  }
+                  onPress={() => startCall(otherId, 'voice')}
                   size={38}
                 />
               </View>

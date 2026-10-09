@@ -192,18 +192,55 @@ app ◄──WebSocket events──── UserSocket DO ◄───────
   today. Each message row carries an `encryption` column, and Phase 8 adds per-device
   ciphertext envelopes. Until then, the server can read messages.
 
-## Calling (planned, Phase 5)
+## Calling (implemented, Phase 5)
 
-- **Media:** LiveKit carries voice and video over WebRTC. Each call is a LiveKit room.
-- **Tokens:** the Worker mints a room-scoped access token, valid for a few minutes and
-  only for call participants. The LiveKit API secret stays on the Worker.
-- **Signalling:** ring, accept, decline and end travel over the existing WebSocket
-  plus push (Phase 6).
-- **Encryption:** LiveKit supports E2EE on React Native through its `RNE2EEManager`.
-  In Phase 8 the room key is distributed over the E2EE messaging channel rather than
-  in the token.
-- **Hosting:** LiveKit Cloud (has a free tier; needs your approval) or self-hosted.
-  This decision is pending.
+One-to-one voice and video calls. Group calls are not in scope yet.
+
+- **Call records:** D1 `calls` (migration 0004). The call id is also the LiveKit room
+  name. States: `ringing → active → ended`, or `declined`, `cancelled`, `missed`.
+  A ringing call that nobody answers within `RING_TIMEOUT_MS` (45 s) becomes `missed`.
+  Expiry is lazy: it is applied whenever calls are read or started, so no cron is
+  needed.
+- **Who may do what:**
+  - Only the callee can accept or decline.
+  - Either participant can end.
+  - Busy users (with another ringing or active call) get `409`.
+  - Non-participants get `404`.
+  - All transitions are conditional `UPDATE … WHERE state IN (…)`, so races (accept
+    vs. cancel) resolve to exactly one outcome.
+- **Tokens:**
+  - `lib/livekit.ts` mints a LiveKit access token on the Worker only when a call is
+    started, accepted or rejoined.
+  - The token is scoped to that one room and the user's own identity, and is valid
+    for 10 minutes (only for joining).
+  - It may publish only the microphone and camera; data messages and metadata changes
+    are disabled.
+  - `LIVEKIT_API_SECRET` never leaves the Worker. The app receives `{url, token}`.
+- **Signalling:** every state change is pushed to both users' devices over the
+  existing WebSocket as `{type:'call', call}`. There is no separate signalling server.
+  Background and killed-app delivery needs PushKit/CallKit and FCM (Phase 6). Until
+  then, **incoming calls only ring while the app is open.**
+- **App:**
+  - `features/calls/controller.ts` is a framework-free state machine:
+    `idle → outgoing | incoming → connecting → connected ⇄ reconnecting → ended`.
+  - It is driven by API results, realtime events and a `MediaSession`.
+  - `media.ts` implements `MediaSession` with `livekit-client` + `@livekit/react-native`
+    (WebRTC), including iOS/Android audio routing.
+  - Tests use a fake session.
+  - The caller joins the room while ringing, so media starts as soon as the callee
+    joins.
+  - A second incoming call while busy is declined automatically.
+  - `CallRouter` (root layout) opens the incoming-call screen.
+- **Native:**
+  - Config plugins `@livekit/react-native-expo-plugin` and
+    `@config-plugins/react-native-webrtc` add camera and microphone usage strings.
+  - `UIBackgroundModes: audio` keeps a call's audio alive in the background.
+- **Encryption:** media is protected by DTLS-SRTP between each device and the LiveKit
+  server, **not end to end**: the LiveKit server can access the media. Phase 8 adds
+  LiveKit E2EE (frame encryption through `RNE2EEManager`) with the room key
+  distributed over the E2EE messaging channel, never in the token.
+- **Hosting:** development uses a local `livekit-server --dev` (no account, no cost).
+  LiveKit Cloud or a self-hosted server for real use is **pending your approval**.
 
 ## Notifications (planned, Phase 6)
 
@@ -292,7 +329,7 @@ Planned:
 | Apple Developer Program      | Push, VoIP, TestFlight         | US$99/year; required from Phase 6                                            |
 | Expo EAS Build               | Android APK, iOS device builds | Free tier has a monthly build quota                                          |
 | Firebase Cloud Messaging     | Android push                   | Free                                                                         |
-| LiveKit Cloud (or self-host) | Voice and video                | Free tier available; self-hosting needs a server                             |
+| LiveKit Cloud (or self-host) | Voice and video                | Free tier available; self-hosting needs a server. Local dev server is free.  |
 
 ## Known risks
 

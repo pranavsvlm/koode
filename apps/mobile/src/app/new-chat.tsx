@@ -10,6 +10,7 @@ import { haptics } from '@/lib/haptics';
 import { cn } from '@/lib/cn';
 import { useChat } from '@/stores/chat';
 import { MotionView } from '@/components/ui/MotionView';
+import { startCall } from '@/features/calls/startCall';
 
 type Step = 'pick' | 'name';
 
@@ -34,7 +35,8 @@ export default function NewChatScreen() {
 
   const choose = (c: Contact) => {
     if (callMode) {
-      router.replace({ pathname: '/call/[id]', params: { id: c.id, kind: 'voice' } });
+      router.dismiss();
+      startCall(c.id, 'voice');
       return;
     }
     if (!group) {

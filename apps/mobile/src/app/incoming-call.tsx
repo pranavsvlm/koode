@@ -5,6 +5,7 @@ import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Avatar, Text, useToast } from '@/components/ui';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
+import { callController, useCall } from '@/features/calls';
 import { openConversation } from '@/features/chat/openConversation';
 import { CallControlButton } from '@/features/call/CallControls';
 import { PulseRings } from '@/features/call/PulseRings';
@@ -24,6 +25,8 @@ export default function IncomingCallScreen() {
   }>();
   const contact = useChat((s) => s.contacts[contactId]);
   const addCall = useChat((s) => s.addCall);
+  const live = useChat((s) => s.mode === 'live');
+  const call = useCall();
   const toast = useToast();
 
   useEffect(() => {
@@ -32,9 +35,27 @@ export default function IncomingCallScreen() {
     return () => clearInterval(id);
   }, []);
 
+  // The caller gave up (or the call was answered on another device): close.
+  useEffect(() => {
+    if (live && call.phase === 'ended') {
+      const t = setTimeout(() => router.canGoBack() && router.back(), 600);
+      return () => clearTimeout(t);
+    }
+  }, [live, call.phase]);
+
   if (!contact) return null;
 
+  const accept = () => {
+    if (live) void callController.accept();
+    router.replace({ pathname: '/call/[id]', params: { id: contactId, kind, accepted: '1' } });
+  };
+
   const decline = () => {
+    if (live) {
+      void callController.decline();
+      router.back();
+      return;
+    }
     addCall({
       contactId,
       kind,
@@ -102,12 +123,7 @@ export default function IncomingCallScreen() {
               label="Accept"
               tone="accept"
               size={76}
-              onPress={() =>
-                router.replace({
-                  pathname: '/call/[id]',
-                  params: { id: contactId, kind, accepted: '1' },
-                })
-              }
+              onPress={accept}
             />
           </View>
         </View>

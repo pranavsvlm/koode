@@ -1,4 +1,5 @@
 import {
+  type Call,
   ConversationList,
   ConversationSummary,
   Message,
@@ -77,7 +78,11 @@ function connect(accessToken: string): SocketLike {
 const store = sqliteStore();
 
 /** One engine per signed-in account. */
-export function createMessagingEngine(me: string, onSignedOut: () => void): MessagingEngine {
+export function createMessagingEngine(
+  me: string,
+  onSignedOut: () => void,
+  onCall?: (call: Call) => void,
+): MessagingEngine {
   return new MessagingEngine({
     me,
     api,
@@ -89,6 +94,7 @@ export function createMessagingEngine(me: string, onSignedOut: () => void): Mess
       return { readReceipts: p.readReceipts, typingIndicators: p.typingIndicators };
     },
     onSignedOut,
+    onCall,
     isSignedOutError: (e) => e instanceof SignedOutError,
   });
 }

@@ -1,3 +1,4 @@
+import { VideoView } from '@livekit/react-native';
 import { Image } from 'expo-image';
 import { router, useLocalSearchParams } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -5,81 +6,84 @@ import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Avatar, Text } from '@/components/ui';
+import { Avatar, Icon, Text } from '@/components/ui';
+import { MotionView } from '@/components/ui/MotionView';
 import { devImages } from '@/dev/images';
+import type { CallKind } from '@/domain/types';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
 import { CallControls, type CallControl } from '@/features/call/CallControls';
 import { CallStatus } from '@/features/call/CallStatus';
 import { PulseRings } from '@/features/call/PulseRings';
 import { SelfView } from '@/features/call/SelfView';
-import { useSimulatedCall } from '@/features/call/useSimulatedCall';
-import type { CallKind } from '@/domain/types';
+import { useCallModel } from '@/features/call/useCallModel';
 import { useChat } from '@/stores/chat';
 import { callColors } from '@/theme/tokens';
-import { MotionView } from '@/components/ui/MotionView';
 
 const CONTROLS_HEIGHT = 150;
+const FILL = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 } as const;
 
 export default function CallScreen() {
   const params = useLocalSearchParams<{ id: string; kind?: CallKind; accepted?: string }>();
   const contact = useChat((s) => s.contacts[params.id]);
-  const addCall = useChat((s) => s.addCall);
-  const accepted = params.accepted === '1';
-  const [kind, setKind] = useState<CallKind>(params.kind === 'video' ? 'video' : 'voice');
-  const [muted, setMuted] = useState(false);
-  const [speaker, setSpeaker] = useState(params.kind === 'video');
-  const [cameraOn, setCameraOn] = useState(true);
-  const [frontCamera, setFrontCamera] = useState(true);
+  const m = useCallModel(
+    params.id,
+    params.kind === 'video' ? 'video' : 'voice',
+    params.accepted === '1',
+  );
   const [chromeVisible, setChromeVisible] = useState(true);
-  const { phase, seconds, simulateReconnect, end } = useSimulatedCall({ accepted });
-  const [startedAt] = useState(() => Date.now());
 
-  const video = kind === 'video';
-  const live = phase === 'connected' || phase === 'reconnecting';
+  const video = m.kind === 'video';
+  const inCall = m.phase === 'connected' || m.phase === 'reconnecting';
+  // Live remote video when it exists; sample mode shows a still.
+  const showRemote = video && inCall && (m.live ? !!m.remoteVideo : true);
 
   // Auto-hide controls during a connected video call; tap to bring them back.
   useEffect(() => {
-    if (!video || !live || !chromeVisible) return;
+    if (!showRemote || !chromeVisible) return;
     const t = setTimeout(() => setChromeVisible(false), 4500);
     return () => clearTimeout(t);
-  }, [video, live, chromeVisible]);
+  }, [showRemote, chromeVisible]);
 
-  const hangUp = () => {
-    addCall({
-      contactId: params.id,
-      kind,
-      direction: accepted ? 'incoming' : 'outgoing',
-      outcome: live ? 'answered' : 'cancelled',
-      startedAt,
-      durationSec: live ? seconds : 0,
-    });
-    end();
-    setTimeout(() => router.back(), 650);
-  };
+  // Show why the call ended for a moment, then close.
+  useEffect(() => {
+    if (m.phase !== 'ended') return;
+    const t = setTimeout(() => {
+      if (router.canGoBack()) router.back();
+    }, 900);
+    return () => clearTimeout(t);
+  }, [m.phase]);
 
   if (!contact) return null;
+  const name = contact.displayName;
 
   const controls: CallControl[] = video
     ? [
         {
           key: 'flip',
           icon: 'camera-flip',
-          label: frontCamera ? 'Flip' : 'Front',
-          onPress: () => setFrontCamera((f) => !f),
+          label: m.frontCamera ? 'Flip' : 'Front',
+          onPress: m.flipCamera,
         },
         {
           key: 'camera',
-          icon: cameraOn ? 'video' : 'video-off',
+          icon: m.cameraOn ? 'video' : 'video-off',
           label: 'Camera',
-          active: !cameraOn,
-          onPress: () => setCameraOn((c) => !c),
+          active: !m.cameraOn,
+          onPress: m.toggleCamera,
         },
         {
           key: 'mute',
-          icon: muted ? 'mic-off' : 'mic',
+          icon: m.micOn ? 'mic' : 'mic-off',
           label: 'Mute',
-          active: muted,
-          onPress: () => setMuted((m) => !m),
+          active: !m.micOn,
+          onPress: m.toggleMic,
+        },
+        {
+          key: 'speaker',
+          icon: 'speaker',
+          label: 'Speaker',
+          active: m.speakerOn,
+          onPress: m.toggleSpeaker,
         },
       ]
     : [
@@ -87,42 +91,38 @@ export default function CallScreen() {
           key: 'speaker',
           icon: 'speaker',
           label: 'Speaker',
-          active: speaker,
-          onPress: () => setSpeaker((s) => !s),
+          active: m.speakerOn,
+          onPress: m.toggleSpeaker,
         },
         {
           key: 'mute',
-          icon: muted ? 'mic-off' : 'mic',
+          icon: m.micOn ? 'mic' : 'mic-off',
           label: 'Mute',
-          active: muted,
-          onPress: () => setMuted((m) => !m),
+          active: !m.micOn,
+          onPress: m.toggleMic,
         },
-        {
-          key: 'video',
-          icon: 'video',
-          label: 'Video',
-          onPress: () => {
-            setKind('video');
-            setSpeaker(true);
-          },
-        },
+        { key: 'video', icon: 'video', label: 'Video', onPress: m.toggleCamera },
       ];
 
   return (
     <View className="flex-1" style={{ backgroundColor: callColors.background }}>
       <StatusBar style="light" />
-      {video && live ? (
+      {showRemote ? (
         <Pressable
           style={StyleSheet.absoluteFill}
           onPress={() => setChromeVisible((v) => !v)}
-          accessibilityLabel={`${contact.displayName}'s video. Tap to ${chromeVisible ? 'hide' : 'show'} controls`}
+          accessibilityLabel={`${name}'s video. Tap to ${chromeVisible ? 'hide' : 'show'} controls`}
         >
           <Animated.View entering={FadeIn.duration(500)} style={StyleSheet.absoluteFill}>
-            <Image
-              source={devImages.forest.source}
-              style={StyleSheet.absoluteFill}
-              contentFit="cover"
-            />
+            {m.live && m.remoteVideo ? (
+              <VideoView videoTrack={m.remoteVideo} style={FILL} objectFit="cover" zOrder={0} />
+            ) : (
+              <Image
+                source={devImages.forest.source}
+                style={StyleSheet.absoluteFill}
+                contentFit="cover"
+              />
+            )}
           </Animated.View>
         </Pressable>
       ) : (
@@ -130,56 +130,76 @@ export default function CallScreen() {
       )}
 
       <SafeAreaView className="flex-1" edges={['top', 'bottom']} pointerEvents="box-none">
-        {(!video || !live || chromeVisible) && (
+        {(!showRemote || chromeVisible) && (
           <MotionView
             entering={FadeIn.duration(200)}
             exiting={FadeOut.duration(200)}
             className={
-              video && live ? 'items-center pt-3' : 'flex-1 items-center justify-center gap-4'
+              showRemote ? 'items-center pt-3' : 'flex-1 items-center justify-center gap-4'
             }
             pointerEvents="box-none"
           >
-            {!(video && live) && (
-              <PulseRings size={136} active={phase === 'calling' || phase === 'ringing'}>
-                <Avatar id={contact.id} name={contact.displayName} size={136} />
+            {!showRemote && (
+              <PulseRings size={136} active={m.phase === 'calling' || m.phase === 'ringing'}>
+                <Avatar id={contact.id} name={name} size={136} />
               </PulseRings>
             )}
             <View
               className={
-                video && live
+                showRemote
                   ? 'items-center rounded-full bg-black/35 px-4 py-1.5'
                   : 'mt-4 items-center gap-1'
               }
             >
-              <Text
-                variant={video && live ? 'headline' : 'title1'}
-                style={{ color: callColors.text }}
-              >
-                {contact.displayName}
+              <Text variant={showRemote ? 'headline' : 'title1'} style={{ color: callColors.text }}>
+                {name}
               </Text>
               <Pressable
-                onLongPress={__DEV__ ? simulateReconnect : undefined}
-                accessibilityHint={__DEV__ ? 'Long press to simulate a reconnect' : undefined}
+                onLongPress={__DEV__ ? m.simulateReconnect : undefined}
+                accessibilityHint={
+                  __DEV__ && m.simulateReconnect ? 'Long press to simulate a reconnect' : undefined
+                }
               >
-                <CallStatus phase={phase} seconds={seconds} />
+                <CallStatus
+                  phase={m.phase}
+                  seconds={m.seconds}
+                  endedLabel={m.endedLabel}
+                  weak={m.quality === 'poor'}
+                />
               </Pressable>
             </View>
+            {m.cameraUnavailable && (
+              <View className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1">
+                <Icon name="video-off" size={13} color={callColors.textSecondary} />
+                <Text variant="caption" style={{ color: callColors.textSecondary }}>
+                  Camera unavailable
+                </Text>
+              </View>
+            )}
           </MotionView>
         )}
-        {video && live && <View className="flex-1" pointerEvents="none" />}
+        {showRemote && <View className="flex-1" pointerEvents="none" />}
 
-        {(!video || !live || chromeVisible) && (
+        {(!showRemote || chromeVisible) && (
           <MotionView
             entering={FadeIn.duration(200)}
             exiting={FadeOut.duration(200)}
             className="pb-2"
           >
-            <CallControls controls={controls} onEnd={hangUp} />
+            <CallControls controls={controls} onEnd={m.hangUp} />
           </MotionView>
         )}
       </SafeAreaView>
 
-      {video && <SelfView cameraOn={cameraOn} bottomInset={CONTROLS_HEIGHT + 24} />}
+      {video && (
+        <SelfView
+          cameraOn={m.cameraOn}
+          track={m.localVideo}
+          mirror={m.frontCamera}
+          unavailable={m.cameraUnavailable}
+          bottomInset={CONTROLS_HEIGHT + 24}
+        />
+      )}
     </View>
   );
 }

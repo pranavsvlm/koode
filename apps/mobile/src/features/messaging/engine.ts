@@ -1,5 +1,6 @@
 import {
   ServerEvent,
+  type Call,
   type ConversationSummary,
   type CreateConversationRequest,
   type Message,
@@ -47,6 +48,8 @@ export type EngineDeps = {
   prefs: () => { readReceipts: boolean; typingIndicators: boolean };
   /** Called when the account can no longer authenticate. */
   onSignedOut?: () => void;
+  /** Call signalling arrives on the same socket; the call controller handles it. */
+  onCall?: (call: Call) => void;
   isSignedOutError?: (e: unknown) => boolean;
   now?: () => number;
   random?: () => number;
@@ -98,8 +101,8 @@ function describeError(e: unknown): string {
  * receipts and throttled typing. Framework-agnostic; React subscribes.
  */
 export class MessagingEngine {
-  private deps: Required<Omit<EngineDeps, 'onSignedOut' | 'isSignedOutError'>> &
-    Pick<EngineDeps, 'onSignedOut' | 'isSignedOutError'>;
+  private deps: Required<Omit<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall'>> &
+    Pick<EngineDeps, 'onSignedOut' | 'isSignedOutError' | 'onCall'>;
   private snapshot: Snapshot = {
     connection: 'offline',
     conversations: [],
@@ -325,6 +328,9 @@ export class MessagingEngine {
         break;
       case 'conversation':
         void this.syncConversation(event.conversationId);
+        break;
+      case 'call':
+        this.deps.onCall?.(event.call);
         break;
       default:
         break;

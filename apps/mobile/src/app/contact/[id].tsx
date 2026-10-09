@@ -18,6 +18,7 @@ import { formatLastSeen } from '@/lib/format';
 import { detailOptions } from '@/navigation/options';
 import { useChat } from '@/stores/chat';
 import { useThemeColors } from '@/theme/ThemeProvider';
+import { startCall } from '@/features/calls/startCall';
 
 function Action({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
   return (
@@ -93,20 +94,8 @@ export default function ContactScreen() {
             )
           }
         />
-        <Action
-          icon="phone"
-          label="Call"
-          onPress={() =>
-            router.push({ pathname: '/call/[id]', params: { id: contact.id, kind: 'voice' } })
-          }
-        />
-        <Action
-          icon="video"
-          label="Video"
-          onPress={() =>
-            router.push({ pathname: '/call/[id]', params: { id: contact.id, kind: 'video' } })
-          }
-        />
+        <Action icon="phone" label="Call" onPress={() => startCall(contact.id, 'voice')} />
+        <Action icon="video" label="Video" onPress={() => startCall(contact.id, 'video')} />
       </View>
 
       {media.length > 0 && (

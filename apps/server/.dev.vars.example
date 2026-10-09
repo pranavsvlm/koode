@@ -6,6 +6,13 @@
 # limiting. At least 32 random bytes. Rotating it signs everyone out.
 AUTH_TOKEN_SECRET=
 
+# LiveKit (voice/video). For local development run `livekit-server --dev`, which
+# uses these well-known development credentials. In production, use your LiveKit
+# project's URL and a real key pair via `wrangler secret put` — the API secret
+# must never ship in the app.
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=secret
+
 # Introduced in later phases:
-#   Phase 5: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL
 #   Phase 6: APNS_*, FCM_*

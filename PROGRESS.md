@@ -6,14 +6,133 @@
 | 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator          |
 | 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator          |
 | 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator    |
-| 5     | Voice and video calling  | ⏳ Awaiting approval                                   |
-| 6     | Notifications            | —                                                      |
+| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator    |
+| 6     | Notifications            | ⏳ Awaiting approval                                   |
 | 7     | Media and group features | —                                                      |
 | 8     | Security and E2EE        | —                                                      |
 | 9     | Performance and testing  | —                                                      |
 | 10    | Builds and distribution  | —                                                      |
 
 **E2EE status: not implemented.** Traffic is protected by TLS only.
+
+---
+
+## Phase 5: Voice and video calling (2026-10-09)
+
+One-to-one voice and video calls are **real**. They are signalled through the Worker
+and WebSocket, with media through LiveKit (WebRTC). Development uses a **local**
+`livekit-server --dev`, so no account is involved and nothing is billed. Incoming calls
+**only ring while the app is open** until PushKit/CallKit and FCM land (Phase 6).
+**Call media is not end-to-end encrypted yet (Phase 8).**
+
+### Delivered
+
+- **Server:**
+  - Migration `0004_calls`.
+  - Call routes: start, accept, decline, end, rejoin, history and lookup. The state
+    machine covers ringing → active → ended, plus declined, cancelled and missed.
+  - Conditional transitions resolve races (for example accept vs. cancel) to one
+    outcome.
+  - A 45 s ring timeout with lazy expiry, busy detection (409), and participant-only
+    access.
+  - LiveKit tokens minted on the Worker: one room, own identity, 10 minutes,
+    microphone and camera only, no data or metadata.
+  - Every change is pushed to both users as a `call` realtime event.
+  - Hardening: the token-signing secret and the LiveKit settings are checked at use.
+    A missing or short secret fails closed.
+- **Shared:** call schemas and the `call` server event.
+- **App:**
+  - `CallController`, a tested state machine. It auto-declines a second call while
+    busy, cancels after the ring timeout, ends on media loss, and shows reconnecting
+    and connection quality.
+  - `MediaSession` with a LiveKit implementation: audio session, speaker/earpiece
+    routing, mic, camera, flip.
+  - Incoming calls open the incoming-call screen through `CallRouter`.
+  - The call screen shows live remote video full screen and the self-view. It has a
+    "weak connection" status and a "Camera unavailable" notice, and closes itself
+    after the call ends.
+  - Every call button (chat header, contact, new-call sheet, Calls tab) starts a real
+    call.
+  - The Calls tab shows server history (answered with duration, missed, declined,
+    cancelled).
+  - Native: LiveKit and WebRTC config plugins, camera and microphone usage strings,
+    background audio mode.
+- **Dev tooling:**
+  - The `calls` mode of the screen tour, with LiveKit info logs.
+  - `scripts/call-peer.mjs`, a second account that uses the LiveKit CLI as its media
+    client.
+
+### Verification
+
+| Check                                                                                                                                                                                                          | Result                  |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| TypeScript, ESLint, Prettier (all packages)                                                                                                                                                                    | ✅ Pass                 |
+| Shared schema tests                                                                                                                                                                                            | ✅ 31/31                |
+| Server tests in the Workers runtime (8 new call tests: ringing + token claims verified with the secret, self/unknown, busy, callee-only accept, outcomes, notifications, timeout → missed, history and access) | ✅ 56/56                |
+| Mobile tests (18 new controller tests with fake media and clock)                                                                                                                                               | ✅ 144/144              |
+| Native iOS build with LiveKit WebRTC; installed on the iOS 27 Simulator                                                                                                                                        | ✅                      |
+| **Two accounts on the Simulator + a Node peer, local Worker and local LiveKit**                                                                                                                                | ✅ Screenshots and logs |
+| Peer video-calls → incoming screen in the app → accept → both identities ACTIVE in the room, 1 published track each (`lk room participants list`)                                                              | ✅                      |
+| The app receives the peer's video (LiveKit demo video shown full screen); mute reaches the controller; the peer hangs up → app returns to Chats; history "Incoming video · 14 sec"                             | ✅                      |
+| App calls the peer → "Ringing…" → peer declines → app shows it, history "Declined voice call"; the server shows the same two calls                                                                             | ✅                      |
+| The app's media session leaves the room when a call ends (LiveKit server log: `CLIENT_REQUEST_LEAVE` at hang-up/decline)                                                                                       | ✅                      |
+
+Bugs found by these tests and fixed:
+
+- The app crashed at launch: `useSyncExternalStore` called the controller's
+  `subscribe` without `this`. It is now an arrow property, with a regression test.
+- Jest couldn't load screens that import LiveKit; the packages are stubbed in
+  `jest.setup.ts`.
+- The server test config had never applied its secret bindings (tests only passed
+  with a local `.dev.vars`). The bindings are now in place, and the suite passes with
+  or without the file.
+- The call timer called `Date.now()` during render; the controller now records
+  `connectedAt`.
+
+### Not verified
+
+- **Tapping by hand:** Accept, Mute and the call buttons were driven by the tour,
+  calling the same handlers as the buttons, not by taps.
+- **Hearing audio:** tracks were published and subscribed, but nobody listened. The
+  Simulator's microphone and speaker are not a real test. Echo, speaker/earpiece
+  switching, Bluetooth and interruptions (a phone call, Siri) need a real phone.
+- **The camera:** the Simulator's camera sends black frames, so the self-view, Flip
+  and the app's outgoing video have not been seen working. Real phone needed.
+- **Real networks:** Wi-Fi ↔ cellular handover and reconnection, poor-network quality
+  indicators, TURN/relay traversal (the local server is on the same Mac).
+- **Background, lock screen and killed app:** not supported until Phase 6.
+- **Two phones, Android, LiveKit Cloud or a self-hosted server.**
+
+### Known issues and limitations
+
+- **Not end-to-end encrypted:** media is encrypted between each device and the
+  LiveKit server (DTLS-SRTP), and the LiveKit server can access it.
+- Incoming calls ring only while the app is in the foreground (Phase 6).
+- **An outgoing call dropped once:** in one of four runs, the app left the LiveKit
+  room about 1 s into an outgoing call, while it still showed "Ringing…". This was not
+  reproduced in two later runs, including one built to recreate the timing. The calls
+  tour now logs LiveKit's info output so it can be diagnosed if it happens again.
+- After a call, LiveKit logs a harmless "ping timeout" warning for the closed room.
+  The library ignores it once the room is closed, and a later call is unaffected
+  (verified).
+- In development, LiveKit's "could not determine track dimensions" error (from the
+  Simulator's camera) shows the red LogBox banner.
+- `POST /calls/:id/rejoin` exists, but the app doesn't use it yet. If the app
+  restarts mid-call, the call is not resumed.
+- One-to-one only; no group calls.
+- Android: `@config-plugins/react-native-webrtc` adds storage and overlay
+  permissions; review them in Phase 10.
+
+### Manual configuration required
+
+- **Development (done on this Mac):**
+  - `brew install livekit livekit-cli`; run `livekit-server --dev --bind 0.0.0.0`.
+  - The `LIVEKIT_*` values are in `apps/server/.dev.vars`.
+  - Migration 0004 applied locally; native app rebuilt.
+- **Before real use (needs your decision and approval):**
+  - Choose LiveKit Cloud (free tier, external service) or a self-hosted LiveKit
+    server.
+  - Set `LIVEKIT_URL`, `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET` as Worker secrets.
 
 ---
 

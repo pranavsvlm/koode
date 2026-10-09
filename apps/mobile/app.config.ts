@@ -32,6 +32,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ios: {
     bundleIdentifier: VARIANTS[variant].id,
     supportsTablet: false,
+    infoPlist: {
+      // Keep call audio running when the app is in the background.
+      UIBackgroundModes: ['audio'],
+    },
   },
   android: {
     package: VARIANTS[variant].id,
@@ -65,6 +69,15 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-sqlite',
     'expo-image',
     // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
+    // Voice/video calls (LiveKit over WebRTC).
+    '@livekit/react-native-expo-plugin',
+    [
+      '@config-plugins/react-native-webrtc',
+      {
+        cameraPermission: 'Koode uses your camera for video calls.',
+        microphonePermission: 'Koode uses your microphone for voice and video calls.',
+      },
+    ],
     './plugins/withSceneLifecycle',
     // Dev builds reopen the last Metro server instead of showing the launcher, and
     // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.

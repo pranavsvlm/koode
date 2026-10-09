@@ -60,6 +60,24 @@ The signed message is
 | POST   | `/v1/conversations/:id/receipts` | 🔒   | `{delivered?, read?, shareRead = true}`                                                                         |
 | GET    | `/v1/realtime`                   | 🔒   | WebSocket upgrade (the bearer token goes in the `Authorization` header)                                         |
 
+## Calls
+
+One-to-one calls. `media` is `{url, token}`: a LiveKit server URL and an access token
+for that call's room only (10 minutes; may publish microphone and camera only).
+
+| Method | Path                    | Auth | Purpose                                                                                                                  |
+| ------ | ----------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------ |
+| GET    | `/v1/calls`             | 🔒   | Your last 100 calls, newest first → `{calls}`                                                                            |
+| POST   | `/v1/calls`             | 🔒   | `{userId, kind: 'voice' \| 'video'}` → `{call, media}` (201). 400 calling yourself, 404 unknown, 409 busy                |
+| GET    | `/v1/calls/:id`         | 🔒   | One call (404 unless you're a participant)                                                                               |
+| POST   | `/v1/calls/:id/accept`  | 🔒   | Callee only (403 otherwise); ringing → active → `{call, media}`. 409 if no longer ringing                                |
+| POST   | `/v1/calls/:id/decline` | 🔒   | Callee only; ringing → declined                                                                                          |
+| POST   | `/v1/calls/:id/end`     | 🔒   | Caller while ringing → cancelled (missed after the timeout); callee while ringing → declined; active → ended. Idempotent |
+| POST   | `/v1/calls/:id/rejoin`  | 🔒   | New `media` for an active call you're in (e.g. after the app restarts)                                                   |
+
+States: `ringing`, `active`, `ended`, `declined`, `cancelled`, `missed`. Unanswered
+calls become `missed` after 45 seconds.
+
 ### Realtime protocol (JSON text frames)
 
 **Server → client:**
@@ -70,6 +88,8 @@ The signed message is
 - `{type:'receipt', conversationId, userId, deliveredSeq, readSeq}`
 - `{type:'typing', conversationId, userId}`
 - `{type:'conversation', conversationId}`: re-fetch that conversation.
+- `{type:'call', call}`: a call you're in was started or changed state (sent to all of
+  both participants' devices).
 
 **Client → server:**
 

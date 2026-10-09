@@ -1,18 +1,24 @@
 import '../../global.css';
 import '@/theme/interop';
 
+import { registerGlobals } from '@livekit/react-native';
+
 import { SplashScreen, Stack } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { AppState } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
+import { CallRouter } from '@/features/calls/CallRouter';
 import { useDevTour } from '@/dev/tour';
 import { DialogProvider, ToastProvider } from '@/components/ui';
 import { useChat } from '@/stores/chat';
 import { usePreferences } from '@/stores/preferences';
 import { useSession } from '@/stores/session';
 import { ThemeProvider, useThemeColors } from '@/theme/ThemeProvider';
+
+// WebRTC globals for LiveKit (also configures the iOS audio session).
+registerGlobals();
 
 void SplashScreen.preventAutoHideAsync();
 
@@ -123,6 +129,7 @@ export default function RootLayout() {
           <ToastProvider>
             <DialogProvider>
               <RootStack />
+              <CallRouter />
             </DialogProvider>
           </ToastProvider>
           {!splashDone && <AnimatedSplash onDone={finishSplash} />}

@@ -10,6 +10,7 @@ import { devices } from './routes/devices';
 import { health } from './routes/health';
 import { invites } from './routes/invites';
 import { me } from './routes/me';
+import { calls } from './routes/calls';
 import { conversations } from './routes/conversations';
 import { realtime } from './routes/realtime';
 import { users } from './routes/users';
@@ -41,6 +42,7 @@ export function createApp() {
   app.route(`${API_PREFIX}/invites`, invites);
   app.route(`${API_PREFIX}/users`, users);
   app.route(`${API_PREFIX}/conversations`, conversations);
+  app.route(`${API_PREFIX}/calls`, calls);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found', c.get('requestId')), 404));
 
