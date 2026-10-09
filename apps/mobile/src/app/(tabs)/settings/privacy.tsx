@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { ScrollView, View } from 'react-native';
 import { Icon, ListRow, ListSection, Text, useToast } from '@/components/ui';
 import { usePreferences, type LastSeenVisibility } from '@/stores/preferences';
@@ -76,15 +77,15 @@ export default function PrivacyScreen() {
         <ListRow
           icon="devices"
           title="Linked Devices"
-          accessory={{ type: 'chevron', value: '1' }}
-          onPress={() => toast.show({ title: 'Device management arrives in Phase 3' })}
+          accessory={{ type: 'chevron' }}
+          onPress={() => router.push('/settings/devices')}
         />
         <ListRow
           icon="key"
           iconTint="warning"
           title="Recovery Key"
           accessory={{ type: 'chevron' }}
-          onPress={() => toast.show({ title: 'Recovery key management arrives in Phase 3' })}
+          onPress={() => router.push('/settings/recovery-key')}
         />
         <ListRow
           icon="hand"

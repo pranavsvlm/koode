@@ -18,6 +18,8 @@ export class ApiClientError extends Error {
 
 export type ApiRequestOptions = Omit<RequestInit, 'body'> & {
   body?: unknown;
+  /** Bearer access token. */
+  token?: string;
   timeoutMs?: number;
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -39,6 +41,7 @@ export async function apiRequest<T>(
     fetchImpl = fetch,
     signal,
     headers,
+    token,
     ...init
   }: ApiRequestOptions = {},
 ): Promise<T> {
@@ -59,6 +62,7 @@ export async function apiRequest<T>(
       headers: {
         Accept: 'application/json',
         ...(body !== undefined && { 'Content-Type': 'application/json' }),
+        ...(token && { Authorization: `Bearer ${token}` }),
         ...headers,
       },
       body: body === undefined ? undefined : JSON.stringify(body),

@@ -12,6 +12,9 @@ export default function SettingsLayout() {
       <Stack.Screen name="privacy" options={{ title: 'Privacy & Security', ...detail }} />
       <Stack.Screen name="notifications" options={{ title: 'Notifications', ...detail }} />
       <Stack.Screen name="appearance" options={{ title: 'Appearance', ...detail }} />
+      <Stack.Screen name="invites" options={{ title: 'Invitations', ...detail }} />
+      <Stack.Screen name="devices" options={{ title: 'Devices', ...detail }} />
+      <Stack.Screen name="recovery-key" options={{ title: 'Recovery Key', ...detail }} />
     </Stack>
   );
 }

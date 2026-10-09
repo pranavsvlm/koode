@@ -4,6 +4,8 @@
   "main": "expo-router/entry",
   "dependencies": {
     "@koode/shared": "workspace:*",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
     "expo": "~57.0.27",
     "expo-blur": "~57.0.3",
     "expo-clipboard": "~57.0.2",
@@ -67,6 +69,11 @@
     ],
     "setupFilesAfterEnv": [
       "./jest.setup-after-env.ts"
+    ],
+    "transformIgnorePatterns": [
+      "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@noble))",
+      "/node_modules/react-native-reanimated/plugin/",
+      "/node_modules/@react-native/babel-preset/"
     ]
   }
 }

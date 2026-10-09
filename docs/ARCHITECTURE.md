@@ -89,35 +89,58 @@ and several RN libraries still assume a flat `node_modules`.
   downloads go through Worker routes that check membership first, either streaming
   the object or issuing short-lived signed URLs.
 
-## Identity and authentication (planned, Phase 3)
+## Identity and authentication (implemented, Phase 3)
 
-The design collects no email address or phone number.
+No email address, phone number or password is collected. The API is documented in
+[API.md](API.md).
 
 1. **Invites:**
-   - An existing member creates an invite. The server returns a random code once and
-     stores only its hash, an expiry and a use limit.
-   - The very first account uses a bootstrap invite created with a CLI script.
+   - A member creates an invite; the server returns a 12-character Crockford base32
+     code (60 bits) once and stores only its SHA-256 hash.
+   - Each code is single use and expires within 1–30 days (default 7). A person can
+     have at most 10 open invites.
+   - The bootstrap invite comes from `invite:create`; its account becomes `admin`.
 2. **Device keys:**
-   - On registration, the device generates an Ed25519 signing key pair with an audited
-     library (`@noble/curves`).
-   - The private key goes into SecureStore; the server stores only the public key.
-3. **Login:** challenge–response. The server issues a nonce, the device signs it, and
-   the server verifies the signature with WebCrypto Ed25519. No passwords exist to phish
-   or reuse.
+   - On sign-up or recovery, the phone generates an Ed25519 key pair with
+     `@noble/curves` (audited), seeded from `expo-crypto`.
+   - The private key stays in SecureStore (`WHEN_UNLOCKED_THIS_DEVICE_ONLY`, never
+     backed up). The server stores only the public key.
+3. **Proof of key possession:**
+   - Every register, login and recover request signs a server-issued challenge.
+   - Challenges are single use (consumed atomically in D1), expire after 2 minutes,
+     and are bound to their purpose and subject. The signed text is
+     `koode-auth-v1\n<purpose>\n<nonce>\n<public key or device id>`.
+   - The Worker verifies signatures with WebCrypto Ed25519.
 4. **Sessions:**
-   - Short-lived access token: a 15-minute HMAC-signed JWT.
-   - Rotating opaque refresh token: hashed in D1, 30-day expiry.
-   - Presenting an already-rotated refresh token revokes the whole session (reuse
-     detection).
+   - A 15-minute HS256 access token (algorithm pinned on verify).
+   - A rotating 256-bit refresh token, stored hashed, with a 30-day idle and 180-day
+     absolute lifetime.
+   - One live session per device.
+   - The auth middleware re-checks session, device and account state on every
+     request, so revocation is immediate.
+   - Presenting an already-rotated refresh token revokes the session. The app then
+     signs in again silently with its device key.
 5. **Recovery:**
-   - Registration shows a high-entropy recovery key once. It lets the user enrol a new
-     device and revoke lost ones.
-   - Like Signal, recovering an account cannot recover end-to-end-encrypted history.
-6. **Device management:** list devices, rename them, and revoke any device (which
-   revokes its sessions).
-7. **WebSocket auth:** the app exchanges its access token for a single-use, 30-second
-   connection ticket. The token never appears in a URL, because URLs can end up in
-   platform request logs.
+   - The 120-bit recovery key is generated on the phone and stored server-side as a
+     hash.
+   - Username plus key enrols a new device. Wrong-key and unknown-user responses are
+     identical, and attempts are rate-limited per IP and per username.
+   - Recovery can't restore end-to-end-encrypted history (once that exists).
+   - The key can be rotated in Settings.
+6. **Devices:**
+   - List, rename and remove your own devices. Other accounts' devices return 404.
+   - **Signing out removes the device**: its key can't sign in again without the
+     recovery key.
+7. **Abuse protection:**
+   - Auth and preview routes are rate-limited with fixed windows in D1, keyed by an
+     HMAC of the client IP (raw IPs are never stored).
+   - All bodies are validated by the shared Zod schemas, and error messages never
+     echo input.
+   - Names reject control and bidi-override characters.
+8. **Audit:** registrations, logins, recoveries, refresh-token reuse, device and
+   invite changes are recorded without any secrets.
+9. **Planned:** WebSocket tickets (Phase 4) and linking a new device from an existing
+   one (QR).
 
 ## Messaging (planned, Phase 4)
 

@@ -1,8 +1,10 @@
+import * as Crypto from 'expo-crypto';
 import { router, type Href } from 'expo-router';
 import { useEffect } from 'react';
 import { useDevSettings } from '@/dev/settings';
 import { useChat } from '@/stores/chat';
 import { usePreferences, type AppearancePreference } from '@/stores/preferences';
+import { generateRecoveryKey } from '@/features/auth/validation';
 import { useSession } from '@/stores/session';
 
 /**
@@ -22,15 +24,33 @@ const reloadChat = (patch: { slowLoading?: boolean; emptyData?: boolean }) => {
   useChat.setState({ status: 'idle' });
   void useChat.getState().load();
 };
-const signIn = () =>
+const INVITE = process.env.EXPO_PUBLIC_DEV_TOUR_INVITE ?? '';
+
+/**
+ * Real registration against the local server (an end-to-end check of device
+ * keys, signing, the keystore and the API on a real device/Simulator).
+ * Needs an invite: `pnpm --filter @koode/server invite:create`.
+ */
+const signIn = () => {
+  const username = `tour${Math.floor(Math.random() * 1e6)}`;
   useSession
     .getState()
-    .completeOnboarding({ displayName: 'Alex Rivera', username: 'alex', about: 'Family first.' });
-
+    .register({
+      inviteCode: INVITE.replace(/-/g, ''),
+      username,
+      displayName: 'Alex Rivera',
+      recoveryKey: generateRecoveryKey(Crypto.getRandomBytes),
+    })
+    .then(
+      () => console.log(`[tour-auth] registered @${username}`),
+      (e: unknown) =>
+        console.log(`[tour-auth] FAILED ${e instanceof Error ? e.message : String(e)}`),
+    );
+};
 export const TOUR: Step[] = [
   { name: 'welcome', run: go('/welcome') },
-  { name: 'invite', run: go({ pathname: '/invite', params: { code: 'K7QM4XRT9PWD' } }) },
-  { name: 'create-profile', run: go('/create-profile') },
+  { name: 'invite', run: go({ pathname: '/invite', params: { code: INVITE } }) },
+  { name: 'create-profile', run: go({ pathname: '/create-profile', params: { code: INVITE } }) },
   {
     name: 'recovery-key',
     run: go({ pathname: '/recovery-key', params: { name: 'Alex Rivera', username: 'alex' } }),
@@ -72,6 +92,9 @@ export const TOUR: Step[] = [
     },
   },
   { name: 'profile', run: go('/settings/profile') },
+  { name: 'invites', run: go('/settings/invites') },
+  { name: 'devices', run: go('/settings/devices') },
+  { name: 'recovery-key-settings', run: go('/settings/recovery-key') },
   { name: 'privacy', run: go('/settings/privacy') },
   { name: 'notifications', run: go('/settings/notifications') },
   { name: 'appearance', run: go('/settings/appearance') },
@@ -127,8 +150,9 @@ export function useDevTour(mode: string | undefined) {
   const enabled = !!mode;
   useEffect(() => {
     if (!__DEV__ || !enabled) return;
-    // Start signed out so onboarding screens are reachable.
-    useSession.getState().signOut();
+    // Start signed out so onboarding screens are reachable. NOTE: this removes
+    // the current device from its account on the local server.
+    void useSession.getState().signOut();
     const prefs = usePreferences.getState();
     const saved = { appearance: prefs.appearance, accent: prefs.accent };
     if (mode === 'light' || mode === 'dark') {

@@ -1,7 +1,11 @@
-# Copy to .dev.vars for local development. .dev.vars is gitignored.
-# Production values are set with `wrangler secret put <NAME>`.
-#
-# Secrets are introduced in the phase that needs them:
-#   Phase 3: AUTH_TOKEN_SECRET
+# Copy to .dev.vars for local development (gitignored), then set a random value:
+#   node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+# Production values are set with `wrangler secret put <NAME>` — never committed.
+
+# Signs access tokens (HS256) and keys the HMAC used to hash client IPs for rate
+# limiting. At least 32 random bytes. Rotating it signs everyone out.
+AUTH_TOKEN_SECRET=
+
+# Introduced in later phases:
 #   Phase 5: LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL
 #   Phase 6: APNS_*, FCM_*

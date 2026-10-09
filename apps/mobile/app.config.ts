@@ -66,8 +66,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-image',
     // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
     './plugins/withSceneLifecycle',
-    // Dev builds reopen the last Metro server instead of showing the launcher.
-    ['expo-dev-client', { launchMode: 'most-recent' }],
+    // Dev builds reopen the last Metro server instead of showing the launcher, and
+    // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.
+    // after the Mac's LAN IP changes.
+    [
+      'expo-dev-client',
+      { launchMode: 'most-recent', ios: { defaultLaunchURL: 'http://localhost:8081' } },
+    ],
   ],
   experiments: {
     typedRoutes: true,

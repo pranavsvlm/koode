@@ -29,7 +29,13 @@ function useHydrated() {
     update();
     return () => unsubs.forEach((u) => u());
   }, [hydrated]);
-  return hydrated;
+
+  // Then check the keystore for a signed-in device before showing any route.
+  const status = useSession((s) => s.status);
+  useEffect(() => {
+    if (hydrated && status === 'loading') void useSession.getState().bootstrap();
+  }, [hydrated, status]);
+  return hydrated && status !== 'loading';
 }
 
 function RootStack() {

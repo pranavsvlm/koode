@@ -1,16 +1,30 @@
 import { useState } from 'react';
 import { View } from 'react-native';
 import { KeyboardAwareScrollView } from 'react-native-keyboard-controller';
-import { Avatar, Button, ListRow, ListSection, Text, TextField, useToast } from '@/components/ui';
+import { Avatar, Button, ListRow, ListSection, TextField, useToast } from '@/components/ui';
+import { authErrorMessage } from '@/features/auth/errors';
 import { useSession } from '@/stores/session';
 
 export default function ProfileScreen() {
-  const profile = useSession((s) => s.profile);
+  const user = useSession((s) => s.user);
   const updateProfile = useSession((s) => s.updateProfile);
   const toast = useToast();
-  const [name, setName] = useState(profile?.displayName ?? '');
-  const [about, setAbout] = useState(profile?.about ?? '');
-  const dirty = name.trim() !== profile?.displayName || about.trim() !== (profile?.about ?? '');
+  const [name, setName] = useState(user?.displayName ?? '');
+  const [about, setAbout] = useState(user?.about ?? '');
+  const [saving, setSaving] = useState(false);
+  const dirty = name.trim() !== user?.displayName || about.trim() !== (user?.about ?? '');
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await updateProfile({ displayName: name.trim(), about: about.trim() });
+      toast.show({ title: 'Profile updated', tone: 'success' });
+    } catch (e) {
+      toast.show({ title: 'Couldn’t save', message: authErrorMessage(e), tone: 'error' });
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <KeyboardAwareScrollView
@@ -19,7 +33,7 @@ export default function ProfileScreen() {
       bottomOffset={24}
     >
       <View className="items-center gap-3">
-        <Avatar id={profile?.username ?? 'me'} name={name || '?'} size={112} />
+        <Avatar id={user?.username ?? 'me'} name={name || '?'} size={112} />
         <Button
           label="Change photo"
           variant="plain"
@@ -48,25 +62,20 @@ export default function ProfileScreen() {
         />
       </View>
 
-      <ListSection footer="Your username is how people find you. It can’t be changed in this build.">
+      <ListSection footer="Your username is how people find you. It can’t be changed.">
         <ListRow
           title="Username"
-          accessory={{ type: 'value', value: `@${profile?.username ?? ''}` }}
+          accessory={{ type: 'value', value: `@${user?.username ?? ''}` }}
         />
       </ListSection>
 
       <Button
         label="Save"
         disabled={!dirty || name.trim().length === 0}
+        loading={saving}
         fullWidth
-        onPress={() => {
-          updateProfile({ displayName: name.trim(), about: about.trim() });
-          toast.show({ title: 'Profile updated', tone: 'success' });
-        }}
+        onPress={save}
       />
-      <Text variant="footnote" tone="tertiary" className="text-center">
-        Stored on this device only until accounts arrive in Phase 3.
-      </Text>
     </KeyboardAwareScrollView>
   );
 }

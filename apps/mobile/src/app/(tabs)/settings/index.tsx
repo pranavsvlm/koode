@@ -11,7 +11,7 @@ import { useSession } from '@/stores/session';
 import { accents } from '@/theme/tokens';
 
 export default function SettingsScreen() {
-  const profile = useSession((s) => s.profile);
+  const profile = useSession((s) => s.user);
   const signOut = useSession((s) => s.signOut);
   const appearance = usePreferences((s) => s.appearance);
   const accent = usePreferences((s) => s.accent);
@@ -65,6 +65,16 @@ export default function SettingsScreen() {
         />
       </ListSection>
 
+      <ListSection footer="Koode is invite-only. Each invite works once.">
+        <ListRow
+          icon="person-add"
+          iconTint="success"
+          title="Invite Family & Friends"
+          accessory={{ type: 'chevron' }}
+          onPress={() => router.push('/settings/invites')}
+        />
+      </ListSection>
+
       <ListSection footer="Koode has no ads, no analytics and no third-party trackers.">
         <ListRow
           icon="info"
@@ -83,14 +93,12 @@ export default function SettingsScreen() {
           onPress={async () => {
             const ok = await dialog.confirm({
               title: 'Sign out?',
-              message: 'You’ll need your recovery key or another device to sign back in.',
+              message:
+                'This removes this phone from your account. You’ll need your recovery key to sign back in.',
               confirmLabel: 'Sign Out',
               destructive: true,
             });
-            if (ok) {
-              useChat.setState({ status: 'idle' });
-              signOut();
-            }
+            if (ok) await signOut();
           }}
         />
       </ListSection>

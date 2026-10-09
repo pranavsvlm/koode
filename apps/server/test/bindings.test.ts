@@ -7,7 +7,15 @@ describe('D1 migrations', () => {
       "SELECT name FROM sqlite_master WHERE type = 'table'",
     ).all<{ name: string }>();
     expect(results.map((r) => r.name)).toEqual(
-      expect.arrayContaining(['audit_events', 'devices', 'invites', 'sessions', 'users']),
+      expect.arrayContaining([
+        'audit_events',
+        'auth_challenges',
+        'devices',
+        'invites',
+        'rate_limits',
+        'sessions',
+        'users',
+      ]),
     );
   });
 

@@ -4,8 +4,8 @@
 | ----- | ------------------------ | ------------------------------------------------------ |
 | 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2) |
 | 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator          |
-| 3     | Authentication           | ⏳ Awaiting approval                                   |
-| 4     | Real-time messaging      | —                                                      |
+| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator          |
+| 4     | Real-time messaging      | ⏳ Awaiting approval                                   |
 | 5     | Voice and video calling  | —                                                      |
 | 6     | Notifications            | —                                                      |
 | 7     | Media and group features | —                                                      |
@@ -14,6 +14,92 @@
 | 10    | Builds and distribution  | —                                                      |
 
 **E2EE status: not implemented.** Traffic is protected by TLS only.
+
+---
+
+## Phase 3: Authentication (2026-10-09)
+
+Accounts, sign-in, devices, invites and recovery are **real** and backed by the local
+Worker and D1. Chats, calls and contacts still use the sample data from Phase 2 until
+Phase 4.
+
+### Delivered
+
+- **Server** (see [API.md](docs/API.md) and ARCHITECTURE → Identity):
+  - Invite-only registration.
+  - Ed25519 device-key challenge–response, with single-use, purpose-bound challenges.
+  - Login with the device key.
+  - HS256 access tokens (algorithm pinned).
+  - Rotating, hashed refresh tokens with reuse detection.
+  - Recovery key: hashed; same answer for unknown users; rotatable.
+  - Profile get and update.
+  - Devices: list, rename, remove. Sign-out removes the device.
+  - Invites: create, list, cancel, public preview; 60-bit codes, hashed, single use,
+    10 open per person.
+  - D1-backed rate limiting keyed by HMAC'd IP.
+  - Zod validation shared with the app, and an audit trail with no secrets.
+  - Migration `0002_auth.sql`.
+  - `invite:create` script for the bootstrap invite.
+- **App:**
+  - `authClient`:
+    - Ed25519 via `@noble/curves`, keys in SecureStore (this device only, never
+      backed up).
+    - Single-flight token renewal, with a silent fallback to device-key login.
+    - Automatic sign-out when the device is revoked; stays signed in while offline.
+  - Session store bootstraps from the keystore before the first frame.
+  - Onboarding wired to the API:
+    - Invite: live inviter preview.
+    - Profile: live username availability.
+    - Recovery key: Create Account registers the device.
+    - Sign in: recovery with username and key.
+  - New Settings screens: Invitations, Devices, Recovery Key. Profile saves to the
+    server. The Contacts invite sheet creates real invites.
+  - Dev client falls back to `localhost:8081` when the last Metro address is gone
+    (e.g. after the Mac's IP changes).
+
+### Verification
+
+| Check                                                                                                                                                                                                                                            | Result                       |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| TypeScript, ESLint, Prettier (all packages)                                                                                                                                                                                                      | ✅ Pass                      |
+| Shared schema tests                                                                                                                                                                                                                              | ✅ 26/26                     |
+| Server tests in the Workers runtime (registration, invites, signatures, replay, login, refresh rotation and reuse, forged/`alg:none` tokens, logout, recovery, profile, devices incl. cross-account access, rate limits, hashed rate-limit keys) | ✅ 29/29                     |
+| Mobile tests (incl. auth client against a fake server that verifies real signatures: renew, fallback login, revoked device, offline, single-flight, logout)                                                                                      | ✅ 105/105                   |
+| HTTP smoke test against `wrangler dev` (preview → register → me → refresh → logout)                                                                                                                                                              | ✅                           |
+| Request logs contain no tokens or keys                                                                                                                                                                                                           | ✅ Checked                   |
+| **On the iOS 27 Simulator: real registration through the app** (device key generation, signing, Keychain, API)                                                                                                                                   | ✅ `@tour648241` registered  |
+| Server state after on-device sign-up (admin role, hashed recovery key, public key only, 1 live session, audit events)                                                                                                                            | ✅ Checked in D1             |
+| Session restored from the Keychain after relaunch                                                                                                                                                                                                | ✅ Opens directly into Chats |
+| Auth screens reviewed on the Simulator (invite preview, profile, recovery key, sign-in, settings, invitations, devices, recovery key rotation)                                                                                                   | ✅                           |
+
+### Not verified
+
+- **Tapped by hand:** Create Account, Restore Account, removing another device,
+  rotating the recovery key, and sharing an invite. These were exercised by API
+  tests and the scripted on-device registration, not by tapping on the device.
+- **Two real devices** (e.g. revoking one from the other): covered only by server and
+  unit tests.
+- **Android** (Keystore behaviour), **physical iPhone**, and any **deployed** server.
+  Nothing has been deployed.
+- **Remote rate limiting:** D1 latency under real load is unmeasured.
+
+### Known issues and limitations
+
+- Linking a new device from an existing one (QR) isn't built. Recovery uses the
+  recovery key.
+- Recovery doesn't notify your other devices yet (needs push, Phase 6).
+- Sign-out on a phone you still hold removes it from the account. This is deliberate
+  (no passwords), and you need the recovery key to come back.
+- The dev tour signs out (removes) the current local device before registering a new
+  account.
+
+### Manual configuration required
+
+- Local: put a random `AUTH_TOKEN_SECRET` in `apps/server/.dev.vars` (done on this
+  Mac). Create invites with `pnpm --filter @koode/server invite:create`.
+- Deployment (not done; needs your approval): `wrangler d1 create`, update
+  `database_id`, `wrangler secret put AUTH_TOKEN_SECRET`, then apply migrations
+  remotely.
 
 ---
 

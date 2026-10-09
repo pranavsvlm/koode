@@ -50,11 +50,29 @@ nothing is billed.
 
 ```sh
 cp apps/server/.dev.vars.example apps/server/.dev.vars
+# set AUTH_TOKEN_SECRET in .dev.vars to a random value:
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 pnpm --filter @koode/server db:migrate:local
 pnpm dev:server
 ```
 
 Check it: `curl http://localhost:8787/health` should return `{"status":"ok",…}`.
+
+### Create the first account
+
+Koode is invite-only, so the very first invite comes from a script:
+
+```sh
+pnpm --filter @koode/server invite:create        # prints e.g. CTPV-TBEW-78WW
+```
+
+In the app, choose **I have an invite** and enter the code. The account created
+with this bootstrap invite becomes the instance admin. Everyone else joins through
+invites created in the app (Settings → Invite Family & Friends, or the Contacts
+tab).
+
+To start over locally, delete `apps/server/.wrangler/` and run the migrations
+again.
 
 ## 3. Run the app on the iOS Simulator
 
@@ -86,11 +104,14 @@ links can't drive automated checks. Instead, the development build has a screen
 tour:
 
 ```sh
+CODE=$(pnpm --silent --filter @koode/server invite:create | grep -oE '[0-9A-Z]{4}(-[0-9A-Z]{4}){2}')
 cd apps/mobile
-EXPO_PUBLIC_DEV_TOUR=light npx expo start --dev-client   # or =dark, or =1 to keep your theme
+EXPO_PUBLIC_DEV_TOUR=light EXPO_PUBLIC_DEV_TOUR_INVITE=$CODE npx expo start --dev-client   # or =dark, or =1 to keep your theme
 ```
 
-Relaunch the app. It signs out, walks through every screen roughly every 3.5 seconds,
+Relaunch the app. **The tour signs out first, which removes the current device from
+its account on your local server.** It then registers a fresh account with the
+invite, which doubles as an on-device end-to-end check of sign-up. It signs out, walks through every screen roughly every 3.5 seconds,
 and logs `[tour] <n> <screen>` in Metro so each step can be screenshotted with
 `xcrun simctl io booted screenshot`. Your appearance settings are restored at the
 end. Restart Metro without the variable to stop the tour.

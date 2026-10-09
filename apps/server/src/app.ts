@@ -4,9 +4,14 @@ import { secureHeaders } from 'hono/secure-headers';
 import { API_PREFIX } from '@koode/shared';
 import { ApiError, errorBody } from './lib/errors';
 import { requestLogger } from './lib/logger';
+import type { AccessClaims } from './auth/tokens';
+import { auth } from './routes/auth';
+import { devices } from './routes/devices';
 import { health } from './routes/health';
+import { invites } from './routes/invites';
+import { me } from './routes/me';
 
-export type AppEnv = { Bindings: Env; Variables: RequestIdVariables };
+export type AppEnv = { Bindings: Env; Variables: RequestIdVariables & { auth: AccessClaims } };
 
 export function createApp() {
   const app = new Hono<AppEnv>();
@@ -24,6 +29,10 @@ export function createApp() {
 
   app.route('/health', health);
   app.route(`${API_PREFIX}/health`, health);
+  app.route(`${API_PREFIX}/auth`, auth);
+  app.route(`${API_PREFIX}/me`, me);
+  app.route(`${API_PREFIX}/devices`, devices);
+  app.route(`${API_PREFIX}/invites`, invites);
 
   app.notFound((c) => c.json(errorBody('not_found', 'Route not found', c.get('requestId')), 404));
 

@@ -15,7 +15,7 @@ export default function GroupInfoScreen() {
   const conversation = useChat((s) => s.conversations[id]);
   const contacts = useChat((s) => s.contacts);
   const setMuted = useChat((s) => s.setMuted);
-  const me = useSession((s) => s.profile);
+  const me = useSession((s) => s.user);
 
   if (!conversation) return null;
   const title = conversationTitle(conversation, contacts);

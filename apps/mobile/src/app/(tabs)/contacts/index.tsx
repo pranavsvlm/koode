@@ -1,6 +1,7 @@
 import { router, Stack } from 'expo-router';
 import { useMemo, useState } from 'react';
-import { Pressable, SectionList, Share, View } from 'react-native';
+import { formatInviteCode, type CreatedInvite } from '@koode/shared';
+import { ActivityIndicator, Pressable, SectionList, View } from 'react-native';
 import {
   Avatar,
   Button,
@@ -10,9 +11,12 @@ import {
   Sheet,
   SkeletonList,
   Text,
-  useToast,
 } from '@/components/ui';
 import type { Contact } from '@/domain/types';
+import { authClient } from '@/features/auth';
+import { authErrorMessage } from '@/features/auth/errors';
+import { shareInvite } from '@/features/auth/invites';
+import { useThemeColors } from '@/theme/ThemeProvider';
 import { formatLastSeen } from '@/lib/format';
 import { useChat } from '@/stores/chat';
 
@@ -28,7 +32,7 @@ function sections(contacts: Contact[]) {
 export default function ContactsScreen() {
   const status = useChat((s) => s.status);
   const contacts = useChat((s) => s.contacts);
-  const toast = useToast();
+  const colors = useThemeColors();
   const [query, setQuery] = useState('');
   const [inviteOpen, setInviteOpen] = useState(false);
 
@@ -40,8 +44,15 @@ export default function ContactsScreen() {
     return sections(list);
   }, [contacts, query]);
 
-  // Dev placeholder; real single-use invites are minted by the server in Phase 3.
-  const inviteCode = 'K7QM-4XRT-9PWD';
+  // A fresh single-use invite is created each time the sheet opens.
+  const [invite, setInvite] = useState<CreatedInvite | null>(null);
+  const [inviteError, setInviteError] = useState<string>();
+  const openInvite = () => {
+    setInvite(null);
+    setInviteError(undefined);
+    setInviteOpen(true);
+    authClient.createInvite().then(setInvite, (e: unknown) => setInviteError(authErrorMessage(e)));
+  };
 
   return (
     <>
@@ -56,7 +67,7 @@ export default function ContactsScreen() {
             <IconButton
               icon="person-add"
               accessibilityLabel="Invite someone"
-              onPress={() => setInviteOpen(true)}
+              onPress={openInvite}
               size={36}
             />
           ),
@@ -72,7 +83,7 @@ export default function ContactsScreen() {
         ListHeaderComponent={
           query ? null : (
             <Pressable
-              onPress={() => setInviteOpen(true)}
+              onPress={openInvite}
               accessibilityRole="button"
               className="mx-4 mb-2 mt-1 flex-row items-center gap-3 rounded-xl bg-accent/10 p-4 active:opacity-80"
             >
@@ -127,7 +138,7 @@ export default function ContactsScreen() {
               icon="contacts"
               title="No contacts yet"
               message="Invite the people you want to talk to. They’ll appear here once they join."
-              action={{ label: 'Send an invite', onPress: () => setInviteOpen(true) }}
+              action={{ label: 'Send an invite', onPress: openInvite }}
             />
           )
         }
@@ -139,39 +150,35 @@ export default function ContactsScreen() {
           <Text variant="subhead" tone="secondary" className="text-center">
             Share this code with one person. It works once and expires in 7 days.
           </Text>
-          <View className="items-center rounded-xl bg-surface py-6">
-            <Text
-              variant="title1"
-              style={{ letterSpacing: 3, fontVariant: ['tabular-nums'] }}
-              selectable
-            >
-              {inviteCode}
-            </Text>
+          <View className="min-h-[88px] items-center justify-center rounded-xl bg-surface py-6">
+            {invite ? (
+              <Text
+                variant="title1"
+                style={{ letterSpacing: 3, fontVariant: ['tabular-nums'] }}
+                selectable
+              >
+                {formatInviteCode(invite.code)}
+              </Text>
+            ) : inviteError ? (
+              <Text variant="subhead" tone="danger" className="px-4 text-center">
+                {inviteError}
+              </Text>
+            ) : (
+              <ActivityIndicator color={colors['text-tertiary']} />
+            )}
           </View>
           <Button
             label="Share invite"
             icon="share"
             fullWidth
+            disabled={!invite}
             onPress={async () => {
-              await Share.share({
-                message: `Join me on Koode, our private family chat. Invite code: ${inviteCode}`,
-              });
+              if (!invite) return;
+              await shareInvite(invite.code);
               setInviteOpen(false);
             }}
           />
-          <Button
-            label="Done"
-            variant="plain"
-            fullWidth
-            onPress={() => {
-              setInviteOpen(false);
-              toast.show({
-                title: 'Invite ready',
-                message: 'It stays valid for 7 days.',
-                tone: 'success',
-              });
-            }}
-          />
+          <Button label="Done" variant="plain" fullWidth onPress={() => setInviteOpen(false)} />
         </View>
       </Sheet>
     </>

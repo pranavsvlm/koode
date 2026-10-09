@@ -10,7 +10,8 @@
     "test": "vitest run",
     "cf-typegen": "wrangler types --strict-vars=false",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "db:migrations:new": "wrangler d1 migrations create DB"
+    "db:migrations:new": "wrangler d1 migrations create DB",
+    "invite:create": "node scripts/create-invite.mjs"
   },
   "dependencies": {
     "@koode/shared": "workspace:*",
