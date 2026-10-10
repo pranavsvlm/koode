@@ -45,7 +45,13 @@ export type PushRegistration = z.infer<typeof PushRegistration>;
  * contains message text: that is only in the visible title/body.
  */
 export const PushData = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('message'), conversationId: z.string(), messageId: z.string() }),
+  z.object({
+    type: z.literal('message'),
+    conversationId: z.string(),
+    messageId: z.string(),
+    /** Lets the phone confirm delivery (✓✓) straight from the push. Older servers omit it. */
+    seq: z.number().int().optional(),
+  }),
   z.object({
     type: z.literal('call'),
     callId: z.string(),

@@ -134,6 +134,7 @@ export async function pushMessage(
     type: 'message',
     conversationId: message.conversationId,
     messageId: message.id,
+    seq: message.seq,
   };
 
   const jobs: Job[] = [];

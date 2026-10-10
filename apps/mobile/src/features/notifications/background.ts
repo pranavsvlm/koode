@@ -1,4 +1,5 @@
 import { Call } from '@koode/shared';
+import { z } from 'zod';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { authClient } from '@/features/auth';
@@ -10,6 +11,8 @@ import { parsePushData, tapAction } from './policy';
  * scope from the app entry (index.ts) so it exists before any UI.
  */
 export const BACKGROUND_TASK = 'koode-background-notification';
+
+const Any = z.unknown();
 
 const bodyOf = (data: Record<string, unknown> | undefined): unknown => {
   const raw = data?.body ?? data?.dataString;
@@ -43,5 +46,14 @@ TaskManager.defineTask<Notifications.NotificationTaskPayload>(
     // notification. Android notifications are identified by the push's tag.
     const push = parsePushData(bodyOf(data.data));
     if (push?.type === 'call-ended') await Notifications.dismissNotificationAsync(push.callId);
+    // The message reached this phone: the sender sees ✓✓ now, as with a running
+    // app. (Read receipts still wait for the chat to be opened.)
+    if (push?.type === 'message' && push.seq !== undefined)
+      await authClient
+        .request(`/v1/conversations/${encodeURIComponent(push.conversationId)}/receipts`, Any, {
+          method: 'POST',
+          body: { delivered: push.seq },
+        })
+        .catch(() => {});
   },
 );
