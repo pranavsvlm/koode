@@ -83,6 +83,36 @@ apply DB --remote`, with approval).
 - **Device:** needs a paid Apple Developer account for signing. Use EAS
   (`eas build -p ios --profile development`) or Xcode with your team selected.
 
+### Your own iPhone with a free Apple ID (no Developer Program)
+
+Xcode can sign with a free Apple ID's "personal team":
+
+- **Limits:**
+  - the app stops launching after **7 days** (rebuild and reinstall);
+  - only devices connected to this Mac;
+  - **no push notifications**: personal teams can't sign `aps-environment`, so
+    messages and calls arrive only while the app is open;
+  - CallKit incoming calls through VoIP push are unavailable.
+- **Steps:**
+  1. Xcode → Settings → Accounts: sign in with the Apple ID. On the iPhone, turn
+     on Settings → Privacy & Security → Developer Mode.
+  2. Build and install, with the iPhone unlocked and connected:
+
+     ```sh
+     cd apps/mobile
+     export KOODE_PERSONAL_TEAM=<team id> APP_VARIANT=preview \
+       EXPO_PUBLIC_API_URL=https://koode-server.pranavsvlm.workers.dev
+     npx expo prebuild -p ios --clean
+     npx expo run:ios --device --configuration Release
+     ```
+
+     `KOODE_PERSONAL_TEAM` sets the signing team and drops the push entitlement
+     (`plugins/withoutPushEntitlement.js`). The team id is the `OU` of the "Apple
+     Development" certificate in Keychain Access.
+
+  3. On first launch, trust the developer on the iPhone: Settings → General → VPN
+     & Device Management.
+
 ### TestFlight (configuration ready; uploading needs approval)
 
 1. Apple Developer Program membership and an App Store Connect app record for
