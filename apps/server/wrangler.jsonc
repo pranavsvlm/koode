@@ -21,9 +21,9 @@
     {
       "binding": "DB",
       "database_name": "koode",
-      // Placeholder for local development. Replace with the real ID from
-      // `wrangler d1 create koode` before any remote deploy (see docs/SETUP.md).
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // The deployed database (`wrangler d1 create koode`); local development uses
+      // its own copy under .wrangler/.
+      "database_id": "daf9c5f7-e435-4f30-9403-495ef9136bc5",
       "migrations_dir": "migrations",
     },
   ],
