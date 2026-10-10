@@ -21,6 +21,19 @@ Each needs the owner's explicit decision.
 | **Hosting**                                            | Cloudflare (Workers, D1, Durable Objects, R2), LiveKit (Cloud or self-hosted), the push relay (an always-on Node host), APNs key, Firebase project. See `docs/SETUP.md` and `docs/ARCHITECTURE.md` → Services and cost.                                                                                                                                                                                                                                                                                                                                 |
 | **Privacy policy and support URL**                     | Required by both stores. Content is outlined below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
+## Deployed (2026-10-10)
+
+| Service                 | Where                                              | Notes                                                       |
+| ----------------------- | -------------------------------------------------- | ----------------------------------------------------------- |
+| API Worker              | `https://koode-server.pranavsvlm.workers.dev`      | `pnpm --filter @koode/server run deploy:remote`             |
+| D1 database `koode`     | APAC                                               | Migrations: `pnpm --filter @koode/server db:migrate:remote` |
+| R2 bucket `koode-media` | Private (no public access)                         | Encrypted files only                                        |
+| Secrets                 | `AUTH_TOKEN_SECRET` set                            | LiveKit and push secrets **not set yet**                    |
+| Not deployed            | LiveKit (calls), push relay (APNs), Firebase (FCM) | Calls fail with "Calling isn't configured"; no push         |
+
+Preview and production builds use this API (`eas.json`); development builds use
+`localhost`.
+
 ## Build variants
 
 | Variant     | `APP_VARIANT` | Name          | Identifier                   | Use                           |

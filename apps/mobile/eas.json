@@ -24,13 +24,19 @@
       "extends": "base",
       "distribution": "internal",
       "environment": "preview",
-      "env": { "APP_VARIANT": "preview" },
+      "env": {
+        "APP_VARIANT": "preview",
+        "EXPO_PUBLIC_API_URL": "https://koode-server.pranavsvlm.workers.dev"
+      },
       "android": { "buildType": "apk" }
     },
     "production": {
       "extends": "base",
       "environment": "production",
-      "env": { "APP_VARIANT": "production" },
+      "env": {
+        "APP_VARIANT": "production",
+        "EXPO_PUBLIC_API_URL": "https://koode-server.pranavsvlm.workers.dev"
+      },
       "autoIncrement": true
     }
   },
