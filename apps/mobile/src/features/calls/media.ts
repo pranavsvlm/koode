@@ -7,6 +7,7 @@ import {
   type LocalVideoTrack,
   type Participant,
   type RemoteVideoTrack,
+  VideoPresets,
 } from 'livekit-client';
 import { Platform } from 'react-native';
 
@@ -58,8 +59,23 @@ const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCod
 export function liveKitSession(): MediaSession {
   const keyProvider = new RNKeyProvider({ sharedKey: true });
   const room = new Room({
+    // Receive only the quality the view needs (and pause hidden video)…
     adaptiveStream: true,
+    // …and stop encoding layers nobody is receiving.
     dynacast: true,
+    // 540p: sharp on a phone screen, and light enough to encode and encrypt in
+    // real time on older phones (720p lagged).
+    videoCaptureDefaults: { resolution: VideoPresets.h540.resolution },
+    publishDefaults: {
+      // Three layers (540p, 360p, 180p): the media server forwards the one each
+      // receiver's network can carry, and switches as it changes.
+      simulcast: true,
+      videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360],
+      videoEncoding: VideoPresets.h540.encoding,
+      // On a weak uplink, lower resolution and frame rate together instead of
+      // freezing.
+      degradationPreference: 'balanced',
+    },
     e2ee: { e2eeManager: new RNE2EEManager(keyProvider) },
   });
   const listeners: { [E in keyof MediaEvents]: Set<MediaEvents[E]> } = {

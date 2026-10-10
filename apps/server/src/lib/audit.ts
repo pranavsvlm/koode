@@ -18,7 +18,8 @@ export type AuditEvent =
   | 'identity_key_rejected'
   | 'message_deleted'
   | 'group_changed'
-  | 'account_deleted';
+  | 'account_deleted'
+  | 'avatar_updated';
 
 export function auditStatement(
   db: D1Database,

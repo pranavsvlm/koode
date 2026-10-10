@@ -1,21 +1,58 @@
 import { VideoView } from '@livekit/react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import type { VideoTrack } from 'livekit-client';
+import { TrackEvent, type VideoTrack } from 'livekit-client';
+import { useEffect, useReducer } from 'react';
 import { useWindowDimensions } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Icon, Text } from '@/components/ui';
 import { springs } from '@/theme/tokens';
+import { KoodeVideoView } from '../../../modules/koode-call-ui';
 
 const W = 108;
 const H = 160;
 const MARGIN = 16;
+const RADIUS = 18;
+
+/**
+ * The camera preview. Android draws WebRTC video on a separate surface that
+ * ignores rounded clipping, so it uses KoodeVideoView (a TextureView) there.
+ */
+function Preview({ track, mirror }: { track: VideoTrack; mirror: boolean }) {
+  // Flipping the camera can replace the stream; re-render to follow it.
+  const [, restarted] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    track.on(TrackEvent.Restarted, restarted);
+    return () => void track.off(TrackEvent.Restarted, restarted);
+  }, [track]);
+  // react-native-webrtc's MediaStream (the DOM type has no toURL).
+  const stream = track.mediaStream as unknown as { toURL(): string } | undefined;
+
+  if (KoodeVideoView) {
+    return (
+      <KoodeVideoView
+        streamURL={stream?.toURL() ?? null}
+        mirror={mirror}
+        cornerRadius={RADIUS}
+        style={{ flex: 1 }}
+      />
+    );
+  }
+  return (
+    <VideoView
+      videoTrack={track}
+      style={{ flex: 1 }}
+      objectFit="cover"
+      mirror={mirror}
+      zOrder={1}
+    />
+  );
+}
 
 /**
  * Picture-in-picture self view. Drag it anywhere; it springs to the nearest
- * corner on release, like FaceTime. Shows a placeholder until the camera
- * pipeline lands in Phase 5.
+ * corner on release, like FaceTime. A placeholder shows while the camera is off.
  */
 export function SelfView({
   cameraOn,
@@ -73,7 +110,7 @@ export function SelfView({
             position: 'absolute',
             width: W,
             height: H,
-            borderRadius: 18,
+            borderRadius: RADIUS,
             overflow: 'hidden',
             shadowColor: '#000',
             shadowOpacity: 0.35,
@@ -84,13 +121,7 @@ export function SelfView({
         ]}
       >
         {cameraOn && track ? (
-          <VideoView
-            videoTrack={track}
-            style={{ flex: 1 }}
-            objectFit="cover"
-            mirror={mirror}
-            zOrder={1}
-          />
+          <Preview track={track} mirror={mirror} />
         ) : (
           <LinearGradient
             colors={cameraOn ? ['#3A4A6B', '#1B2236'] : ['#24272E', '#15171C']}

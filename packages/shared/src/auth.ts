@@ -142,9 +142,20 @@ export const UsernameAvailability = z.object({
   reason: z.string().optional(),
 });
 
+/** Who sees when I'm online and when I was last online. */
+export const LastSeenVisibility = z.enum(['contacts', 'nobody']);
+export type LastSeenVisibility = z.infer<typeof LastSeenVisibility>;
+
 export const UpdateProfileRequest = z
-  .object({ displayName: DisplayName.optional(), about: About.optional() })
-  .refine((v) => v.displayName !== undefined || v.about !== undefined, 'Nothing to update');
+  .object({
+    displayName: DisplayName.optional(),
+    about: About.optional(),
+    lastSeen: LastSeenVisibility.optional(),
+  })
+  .refine(
+    (v) => v.displayName !== undefined || v.about !== undefined || v.lastSeen !== undefined,
+    'Nothing to update',
+  );
 
 export const RotateRecoveryKeyRequest = z.object({ recoveryKey: RecoveryKey });
 

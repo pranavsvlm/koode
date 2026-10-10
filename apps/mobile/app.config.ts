@@ -159,7 +159,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         granularPermissions: ['photo', 'video'],
       },
     ],
-    ['expo-video', { supportsBackgroundPlayback: false, supportsPictureInPicture: false }],
+    // supportsPictureInPicture: Android's manifest flag, needed for video calls
+    // to float (koode-call-ui). Video messages don't use picture-in-picture.
+    ['expo-video', { supportsBackgroundPlayback: false, supportsPictureInPicture: true }],
     // iOS 27 requires the UIScene life cycle; Expo adopts it in SDK 58. Remove then.
     './plugins/withSceneLifecycle',
     // End-to-end encryption: Signal's libsignal (pods/Maven; see the plugin).

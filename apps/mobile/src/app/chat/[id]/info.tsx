@@ -17,6 +17,8 @@ import { detailOptions } from '@/navigation/options';
 import { conversationTitle, useChat } from '@/stores/chat';
 import { useSession } from '@/stores/session';
 import { useThemeColors } from '@/theme/ThemeProvider';
+import type { Contact } from '@/domain/types';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 const MAX_MEMBERS = 64;
 
@@ -27,6 +29,7 @@ export default function GroupInfoScreen() {
   const dialog = useDialog();
   const conversation = useChat((s) => s.conversations[id]);
   const contacts = useChat((s) => s.contacts);
+  const myPhoto = useChat((s) => s.myPhoto);
   const live = useChat((s) => s.mode === 'live');
   const { setMuted, renameGroup, addMembers, removeMember, setAdmin, leaveGroup } =
     useChat.getState();
@@ -89,10 +92,11 @@ export default function GroupInfoScreen() {
             <ListRow
               key={memberId}
               leading={
-                <Avatar
+                <ProfileAvatar
                   id={isMe ? (me?.username ?? 'me') : memberId}
                   name={isMe ? (me?.displayName ?? 'You') : name}
                   size={32}
+                  photo={isMe ? myPhoto : contacts[memberId]?.photo}
                 />
               }
               title={name}
@@ -260,7 +264,7 @@ function RenameSheet(p: {
 
 function AddMembersSheet(p: {
   visible: boolean;
-  candidates: { id: string; displayName: string; username: string }[];
+  candidates: Contact[];
   room: number;
   onClose: () => void;
   onAdd: (ids: string[]) => Promise<void>;
@@ -287,7 +291,7 @@ function AddMembersSheet(p: {
             {p.candidates.map((c) => (
               <ListRow
                 key={c.id}
-                leading={<Avatar id={c.id} name={c.displayName} size={32} />}
+                leading={<ProfileAvatar id={c.id} name={c.displayName} size={32} photo={c.photo} />}
                 title={c.displayName}
                 subtitle={`@${c.username}`}
                 accessory={{ type: 'check', checked: picked.includes(c.id) }}

@@ -148,13 +148,32 @@ export const EncryptedAttachment = z.object({
 });
 export type EncryptedAttachment = z.infer<typeof EncryptedAttachment>;
 
+/** An uploaded (encrypted) profile photo. */
+export const AvatarId = z.string().regex(/^av_[A-Za-z0-9_-]{16,64}$/);
+
+/**
+ * The sender's profile photo and the key to it, carried by every message (as
+ * Signal shares profile keys), so whoever the sender writes to can show it and
+ * the server can't. `avatar: null`: no photo.
+ */
+export const ProfileSecret = z.object({
+  avatar: z.object({ id: AvatarId, content: FileSecret }).nullable(),
+});
+export type ProfileSecret = z.infer<typeof ProfileSecret>;
+
 /**
  * Every message payload names its own message and conversation, and a
  * reaction names its target, so the server can't move ciphertext between
  * messages or chats undetected (receivers check them against the envelope's
- * message).
+ * message). `profile` is optional: older apps don't send it.
  */
-const Bound = { v: z.literal(1), id: Id, conversationId: Id };
+const Bound = {
+  v: z.literal(1),
+  id: Id,
+  conversationId: Id,
+  // A profile this version can't read is ignored; the message still opens.
+  profile: ProfileSecret.optional().catch(undefined),
+};
 
 export const Payload = z.discriminatedUnion('t', [
   z.object({ ...Bound, t: z.literal('text'), body: Text, replyToId: Id.nullable() }),

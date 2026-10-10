@@ -38,7 +38,11 @@ const missed = await maya.startCall(app.id, 'voice');
 await sleep(3000);
 await call(`/calls/${missed.call.id}/end`, {}, maya.token);
 const ringing = await maya.startCall(app.id, 'video');
-await sleep(2000);
+// Its notification must arrive while the app is still in the background.
+await waitForLog(new RegExp(`\\[tour-push\\] received .*${ringing.call.id}`), 20_000).catch(
+  () => {},
+);
+await sleep(1000);
 log('background-done');
 
 const presented = await tour('presented');

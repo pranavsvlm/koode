@@ -1,5 +1,6 @@
-import type { OkResponse } from '@koode/shared';
+import type { AvatarUploadResponse, OkResponse } from '@koode/shared';
 import {
+  AVATAR_LIMIT,
   DeleteAccountRequest,
   RotateRecoveryKeyRequest,
   UpdateProfileRequest,
@@ -10,9 +11,12 @@ import type { AppEnv } from '../app';
 import { requireAuth } from '../auth/middleware';
 import { toUser, type UserRow } from '../auth/sessions';
 import { auditStatement } from '../lib/audit';
-import { sha256Hex } from '../lib/crypto';
+import { newId, sha256Hex } from '../lib/crypto';
 import { ApiError } from '../lib/errors';
 import { parseJson } from '../lib/validate';
+import { publishPresence } from '../presence';
+import { avatarKey } from '../media/storage';
+import { store } from './attachments';
 
 const USER_COLUMNS = 'id, username, display_name, about, status, created_at';
 
@@ -36,12 +40,68 @@ export const me = new Hono<AppEnv>()
     await db.batch([
       db
         .prepare(
-          `UPDATE users SET display_name = COALESCE(?, display_name), about = COALESCE(?, about), updated_at = ? WHERE id = ?`,
+          `UPDATE users SET display_name = COALESCE(?, display_name), about = COALESCE(?, about),
+             last_seen_visibility = COALESCE(?, last_seen_visibility), updated_at = ? WHERE id = ?`,
         )
-        .bind(patch.displayName ?? null, patch.about ?? null, Date.now(), userId),
+        .bind(
+          patch.displayName ?? null,
+          patch.about ?? null,
+          patch.lastSeen ?? null,
+          Date.now(),
+          userId,
+        ),
       auditStatement(db, 'profile_updated', { userId, deviceId }),
     ]);
+    // Show or hide my presence for the people I chat with right away.
+    if (patch.lastSeen)
+      c.executionCtx.waitUntil(publishPresence(c.env, userId, patch.lastSeen === 'nobody'));
     return c.json<User>(toUser(await loadUser(db, userId)));
+  })
+
+  /**
+   * My profile photo, encrypted on the device (the server can't tell what the
+   * bytes are). A new upload replaces the old photo; its key reaches others
+   * inside my messages.
+   */
+  .put('/avatar', async (c) => {
+    if (c.req.header('content-type') !== 'application/octet-stream')
+      throw new ApiError('bad_request', 'Profile photos must be encrypted');
+    const { userId, deviceId } = c.get('auth');
+    const db = c.env.DB;
+    const avatarId = newId('av');
+    await store(c, avatarKey(userId, avatarId), {
+      max: AVATAR_LIMIT,
+      contentType: 'application/octet-stream',
+    });
+    const previous = await db
+      .prepare('SELECT avatar_key FROM users WHERE id = ?')
+      .bind(userId)
+      .first<{ avatar_key: string | null }>();
+    await db.batch([
+      db
+        .prepare('UPDATE users SET avatar_key = ?, updated_at = ? WHERE id = ?')
+        .bind(avatarId, Date.now(), userId),
+      auditStatement(db, 'avatar_updated', { userId, deviceId }),
+    ]);
+    if (previous?.avatar_key) await c.env.MEDIA.delete(avatarKey(userId, previous.avatar_key));
+    return c.json<AvatarUploadResponse>({ avatarId });
+  })
+
+  .delete('/avatar', async (c) => {
+    const { userId, deviceId } = c.get('auth');
+    const db = c.env.DB;
+    const previous = await db
+      .prepare('SELECT avatar_key FROM users WHERE id = ?')
+      .bind(userId)
+      .first<{ avatar_key: string | null }>();
+    await db.batch([
+      db
+        .prepare('UPDATE users SET avatar_key = NULL, updated_at = ? WHERE id = ?')
+        .bind(Date.now(), userId),
+      auditStatement(db, 'avatar_updated', { userId, deviceId }),
+    ]);
+    if (previous?.avatar_key) await c.env.MEDIA.delete(avatarKey(userId, previous.avatar_key));
+    return c.json<OkResponse>({ ok: true });
   })
 
   .put('/recovery-key', async (c) => {
@@ -81,6 +141,12 @@ export const me = new Hono<AppEnv>()
       const room = c.env.CONVERSATION_ROOM.get(c.env.CONVERSATION_ROOM.idFromName(conversation_id));
       await room.eraseAccount({ conversationId: conversation_id, userId });
     }
+
+    const photo = await db
+      .prepare('SELECT avatar_key FROM users WHERE id = ?')
+      .bind(userId)
+      .first<{ avatar_key: string | null }>();
+    if (photo?.avatar_key) await c.env.MEDIA.delete(avatarKey(userId, photo.avatar_key));
 
     const devices = 'SELECT id FROM devices WHERE user_id = ?1';
     await db.batch([

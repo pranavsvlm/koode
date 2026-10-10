@@ -32,7 +32,9 @@ The signed message is
 | Method | Path                  | Auth | Purpose                                                                                                                                                                                                                                                               |
 | ------ | --------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | GET    | `/v1/me`              | 🔒   | Your profile                                                                                                                                                                                                                                                          |
-| PATCH  | `/v1/me`              | 🔒   | `{displayName?, about?}`                                                                                                                                                                                                                                              |
+| PATCH  | `/v1/me`              | 🔒   | `{displayName?, about?, lastSeen?}`; `lastSeen`: `contacts` or `nobody` (who sees my presence; hiding it also hides everyone else's from me)                                                                                                                          |
+| PUT    | `/v1/me/avatar`       | 🔒   | Profile photo **ciphertext** (`application/octet-stream`, `Content-Length` required, at most `AVATAR_LIMIT`). Returns `{avatarId}` and deletes the previous photo. The key never reaches the server: it travels in the `profile` field of message payloads            |
+| DELETE | `/v1/me/avatar`       | 🔒   | Removes my profile photo                                                                                                                                                                                                                                              |
 | PUT    | `/v1/me/recovery-key` | 🔒   | `{recoveryKey}`: replaces the recovery key                                                                                                                                                                                                                            |
 | DELETE | `/v1/me`              | 🔒   | `{confirm: 'DELETE'}`: deletes the account. Every device and session is revoked; keys, push registrations and unused invites go; everything the account sent is deleted for everyone; it leaves its groups (admin handed over). The profile becomes "Deleted account" |
 | GET    | `/v1/devices`         | 🔒   | Your active devices (with `current`)                                                                                                                                                                                                                                  |
@@ -52,7 +54,8 @@ The signed message is
 
 | Method | Path                                        | Auth | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------ | ------------------------------------------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| GET    | `/v1/users`                                 | 🔒   | Directory of other active members: `{id, username, displayName, about}`                                                                                                                                                                                                                                                                                                                                                |
+| GET    | `/v1/users/:id/avatar/:avatarId`            | 🔒   | Someone's current profile photo, as ciphertext (404 for a replaced one)                                                                                                                                                                                                                                                                                                                                                |
+| GET    | `/v1/users`                                 | 🔒   | Directory of other active members: `{id, username, displayName, about, online?, lastSeenAt?}`. Presence only for people I share a chat with, and only while we both show it                                                                                                                                                                                                                                            |
 | GET    | `/v1/conversations`                         | 🔒   | Your conversations: members, receipt positions, last message, unread count                                                                                                                                                                                                                                                                                                                                             |
 | POST   | `/v1/conversations`                         | 🔒   | `{kind: 'direct', userId}` (returns the existing chat if there is one) or `{kind: 'group', title, memberIds}`                                                                                                                                                                                                                                                                                                          |
 | GET    | `/v1/conversations/:id`                     | 🔒   | One conversation (404 if you're not a member)                                                                                                                                                                                                                                                                                                                                                                          |
@@ -173,6 +176,9 @@ calls become `missed` after 45 seconds.
 - `{type:'conversation', conversationId}`: re-fetch that conversation.
 - `{type:'call', call}`: a call you're in was started or changed state (sent to all of
   both participants' devices).
+- `{type:'presence', userId, online, lastSeenAt}`: someone you share a chat with
+  connected or disconnected. `online: false, lastSeenAt: null`: they hid their
+  presence.
 
 **Client → server:**
 
@@ -180,7 +186,8 @@ calls become `missed` after 45 seconds.
   Durable Object.
 - `{type:'typing', conversationId}`
 
-Close code `4001` means this device was signed out or removed.
+Close code `4001` means this device was signed out or removed; `4002`, that the
+connection sent nothing for 75 s (a frozen app), and the user is shown offline.
 
 ## Rate limits (per client IP unless noted)
 

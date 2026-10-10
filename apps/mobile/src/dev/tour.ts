@@ -35,6 +35,9 @@ import {
   seedCache,
 } from './perfTour';
 import { runResilience } from './resilienceTour';
+import { ImageManipulator } from 'expo-image-manipulator';
+import { photoFile } from '@/features/profile/photos';
+import { setProfilePhoto } from '@/features/profile/upload';
 
 /**
  * DEVELOPMENT ONLY: walks through every screen so the UI can be reviewed and
@@ -87,6 +90,11 @@ export const TOUR: Step[] = [
   { name: 'sign-in', run: go('/sign-in') },
   { name: 'chats', run: signIn },
   { name: 'chat-direct', run: go('/chat/c-maya') },
+  {
+    name: 'chat-typing',
+    shotAtMs: 2500,
+    run: () => setTimeout(() => devHandles.composer?.focus(), 400),
+  },
   { name: 'chat-group', run: go('/chat/c-family') },
   { name: 'group-info', run: go('/chat/c-family/info') },
   { name: 'contact', run: go('/contact/maya') },
@@ -179,10 +187,21 @@ export const TOUR: Step[] = [
 const firstConversationId = () =>
   Object.values(useChat.getState().conversations).sort((x, y) => y.createdAt - x.createdAt)[0]?.id;
 
+/** The other person in the first chat: presence and profile photo, as the app sees them. */
+const peerContact = () => {
+  const id = firstConversationId();
+  const c = id ? useChat.getState().conversations[id] : undefined;
+  const other = c?.memberIds.find((m) => m !== ME);
+  return other ? useChat.getState().contacts[other] : undefined;
+};
+let photoReady: Promise<void> = Promise.resolve();
+let unwatchPresence: (() => void) | null = null;
+
 /**
  * Two-party messaging check against the real server. A peer script
  * (apps/server/scripts/peer.mjs) plays "Maya": it starts a chat with the
- * account registered here, replies, reads and types.
+ * account registered here, replies, reads and types. Profile photos go both
+ * ways (encrypted), and Maya's presence is followed.
  */
 export const MESSAGING_TOUR: Step[] = [
   {
@@ -200,14 +219,38 @@ export const MESSAGING_TOUR: Step[] = [
       const id = firstConversationId();
       console.log(`[tour-msg] conversation ${id ?? 'NONE'}`);
       if (id) router.navigate(`/chat/${id}`);
+      let last: string | null = null;
+      unwatchPresence?.();
+      unwatchPresence = useChat.subscribe(() => {
+        const c = peerContact();
+        const now = JSON.stringify({
+          online: c?.online ?? null,
+          lastSeenAt: c?.lastSeenAt ?? null,
+        });
+        if (c && now !== last) console.log(`[tour-msg] presence ${(last = now)}`);
+      });
+    },
+  },
+  {
+    name: 'set-photo',
+    run: () => {
+      // My photo goes out (encrypted key) with the next message.
+      const uri = e2eFile('gps.jpg');
+      photoReady = (async () => {
+        const ref = await ImageManipulator.manipulate(uri).renderAsync();
+        await setProfilePhoto({ uri, width: ref.width, height: ref.height });
+        console.log(`[tour-msg] photo-set ${JSON.stringify(useChat.getState().myPhoto?.id)}`);
+      })().catch((e: unknown) => console.log(`[tour-msg] photo-failed ${String(e)}`));
     },
   },
   {
     name: 'send',
     run: () => {
-      const id = firstConversationId();
-      if (id) useChat.getState().send(id, { text: 'Hello from the Simulator 👋' });
-      console.log('[tour-msg] sent');
+      void photoReady.then(() => {
+        const id = firstConversationId();
+        if (id) useChat.getState().send(id, { text: 'Hello from the Simulator 👋' });
+        console.log('[tour-msg] sent');
+      });
     },
   },
   { name: 'peer-typing', run: () => {} },
@@ -220,6 +263,15 @@ export const MESSAGING_TOUR: Step[] = [
       console.log(
         `[tour-msg] final ${JSON.stringify(list.map((m) => [m.senderId === 'me' ? 'me' : 'peer', m.text, m.status]))}`,
       );
+      // The chat header shows Maya's photo, which downloads and decrypts it.
+      const photo = peerContact()?.photo;
+      setTimeout(() => {
+        const f = photo ? photoFile(photo.id) : null;
+        console.log(
+          `[tour-msg] peer-photo ${JSON.stringify({ id: photo?.id ?? null, decrypted: !!f?.exists, size: f?.exists ? f.size : 0 })}`,
+        );
+        unwatchPresence?.();
+      }, 2500);
     },
   },
 ];

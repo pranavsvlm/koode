@@ -1,6 +1,6 @@
 import type { ConversationSummary, PublicUser } from '@koode/shared';
 import * as SQLite from 'expo-sqlite';
-import type { LocalMessage, MessagingStore } from './types';
+import type { LocalMessage, MessagingStore, StoredProfile } from './types';
 
 /**
  * SQLite-backed cache so chats open instantly and work offline. Rows hold
@@ -29,6 +29,7 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
       PRAGMA journal_mode = WAL;
       CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY NOT NULL, doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY NOT NULL, doc TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS profiles (id TEXT PRIMARY KEY NOT NULL, doc TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY NOT NULL,
         conversation_id TEXT NOT NULL,
@@ -75,6 +76,7 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
           await d.getAllAsync('SELECT doc FROM conversations'),
         ),
         users: parse<PublicUser>(await d.getAllAsync('SELECT doc FROM users')),
+        profiles: parse<StoredProfile>(await d.getAllAsync('SELECT doc FROM profiles')),
         // Keep start-up light: the newest messages of each chat (one index
         // range each) and anything still in the outbox; older ones are read
         // from here as the user scrolls (`olderMessages`).
@@ -106,6 +108,14 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
     },
     saveConversations: (list) => upsert('conversations', list),
     saveUsers: (list) => upsert('users', list),
+    async saveProfile(p) {
+      const d = await open();
+      await d.runAsync(
+        'INSERT OR REPLACE INTO profiles (id, doc) VALUES (?, ?)',
+        p.userId,
+        JSON.stringify(p),
+      );
+    },
     async saveMessages(list) {
       if (list.length === 0) return;
       const d = await open();
@@ -152,13 +162,16 @@ export function sqliteStore(name = 'koode-messages.db'): MessagingStore {
     },
     async clear() {
       const d = await open();
-      await d.execAsync('DELETE FROM conversations; DELETE FROM users; DELETE FROM messages;');
+      await d.execAsync(
+        'DELETE FROM conversations; DELETE FROM users; DELETE FROM messages; DELETE FROM profiles;',
+      );
     },
   };
   return {
     load: () => serial(() => store.load()),
     saveConversations: (list) => serial(() => store.saveConversations(list)),
     saveUsers: (list) => serial(() => store.saveUsers(list)),
+    saveProfile: (p) => serial(() => store.saveProfile(p)),
     saveMessages: (list) => serial(() => store.saveMessages(list)),
     getMessages: (ids) => serial(() => store.getMessages(ids)),
     olderMessages: (id, before, limit) => serial(() => store.olderMessages(id, before, limit)),

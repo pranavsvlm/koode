@@ -11,6 +11,9 @@ export const attachmentKeys = (conversationId: string, attachmentId: string) => 
   thumbnailKey(conversationId, attachmentId),
 ];
 
+/** A profile photo (ciphertext; its key travels inside messages). */
+export const avatarKey = (userId: string, avatarId: string) => `avatar/${userId}/${avatarId}`;
+
 /** Uploads that were never sent in a message are removed after this long. */
 export const UNSENT_TTL_MS = 24 * 3600_000;
 

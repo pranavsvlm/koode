@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { Pressable, useWindowDimensions, View, type ViewStyle } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
-import { Avatar, Icon, Text } from '@/components/ui';
+import { Icon, Text } from '@/components/ui';
 import { ME, type Contact, type Message } from '@/domain/types';
 import { formatDuration, formatFileSize, formatTime } from '@/lib/format';
 import { haptics } from '@/lib/haptics';
@@ -14,6 +14,7 @@ import { MessageStatusIcon, statusLabel } from './MessageStatusIcon';
 import { BubbleMedia, fileTypeLabel } from './BubbleMedia';
 import { SwipeToReply } from './SwipeToReply';
 import { VoiceMessage } from './VoiceMessage';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 const BIG = 20;
 const SMALL = 6;
@@ -339,7 +340,14 @@ export const MessageBubble = memo(function MessageBubble({
     >
       {isGroup && !outgoing && (
         <View className="mr-2 w-7">
-          {showAvatar && sender && <Avatar id={sender.id} name={sender.displayName} size={28} />}
+          {showAvatar && sender && (
+            <ProfileAvatar
+              id={sender.id}
+              name={sender.displayName}
+              size={28}
+              photo={sender.photo}
+            />
+          )}
         </View>
       )}
       <View

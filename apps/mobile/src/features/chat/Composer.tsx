@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, TextInput, View } from 'react-native';
 import { useReanimatedKeyboardAnimation } from 'react-native-keyboard-controller';
 import Animated, {
@@ -53,6 +53,7 @@ export function Composer({
   const colors = useThemeColors();
   const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
+  const inputRef = useRef<TextInput>(null);
   const hasText = text.trim().length > 0;
   const voice = useVoiceRecorder();
 
@@ -80,7 +81,7 @@ export function Composer({
   // Development: let the screen tour use the same handlers as the buttons.
   useEffect(() => {
     if (!__DEV__) return;
-    devHandles.composer = { startRecording, sendRecording };
+    devHandles.composer = { startRecording, sendRecording, focus: () => inputRef.current?.focus() };
     return () => {
       devHandles.composer = undefined;
     };
@@ -185,6 +186,7 @@ export function Composer({
           />
           <View className="min-h-[38px] flex-1 justify-center rounded-[19px] bg-fill px-4">
             <TextInput
+              ref={inputRef}
               value={text}
               onChangeText={(t) => {
                 setText(t);

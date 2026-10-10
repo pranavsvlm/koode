@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { KeyboardProvider } from 'react-native-keyboard-controller';
 import { AnimatedSplash } from '@/components/brand/AnimatedSplash';
+import { CallEffects } from '@/features/calls/CallEffects';
 import { CallRouter } from '@/features/calls/CallRouter';
 import { callController } from '@/features/calls';
 import { AppState } from 'react-native';
@@ -157,6 +158,7 @@ export default function RootLayout() {
             <DialogProvider>
               <RootStack />
               <CallRouter />
+              <CallEffects />
             </DialogProvider>
           </ToastProvider>
           {!splashDone && <AnimatedSplash onDone={finishSplash} />}

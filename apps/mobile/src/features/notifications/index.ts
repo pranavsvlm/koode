@@ -264,3 +264,35 @@ export function useNotifications(active: boolean) {
     };
   }, [active]);
 }
+
+// ——— Reminders ———
+
+/** "Remind Me" on an incoming call: a local notification to call them back. */
+export const CALL_REMINDER_MS = 60 * 60_000;
+
+/**
+ * Schedules "Call <name> back" on this device (nothing goes to the server).
+ * It behaves like a missed-call notification: tap for Calls, or Call Back.
+ * Resolves false if notifications aren't allowed.
+ */
+export async function remindToCallBack(
+  call: { callId: string; callerId: string; name: string },
+  inMs = CALL_REMINDER_MS,
+): Promise<boolean> {
+  const { granted } = await Notifications.getPermissionsAsync();
+  if (!granted) return false;
+  await Notifications.scheduleNotificationAsync({
+    content: {
+      title: `Call ${call.name} back`,
+      body: 'You asked Koode to remind you.',
+      data: { type: 'missed-call', callId: call.callId, callerId: call.callerId },
+      categoryIdentifier: 'missed_call',
+    },
+    trigger: {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: Math.round(inMs / 1000),
+      channelId: 'missed-calls',
+    },
+  });
+  return true;
+}

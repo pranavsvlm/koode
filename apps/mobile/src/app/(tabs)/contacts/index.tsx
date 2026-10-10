@@ -2,16 +2,7 @@ import { router, Stack } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { formatInviteCode, type CreatedInvite } from '@koode/shared';
 import { ActivityIndicator, Pressable, SectionList, View } from 'react-native';
-import {
-  Avatar,
-  Button,
-  EmptyState,
-  Icon,
-  IconButton,
-  Sheet,
-  SkeletonList,
-  Text,
-} from '@/components/ui';
+import { Button, EmptyState, Icon, IconButton, Sheet, SkeletonList, Text } from '@/components/ui';
 import type { Contact } from '@/domain/types';
 import { authClient } from '@/features/auth';
 import { authErrorMessage } from '@/features/auth/errors';
@@ -19,6 +10,7 @@ import { shareInvite } from '@/features/auth/invites';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import { formatLastSeen } from '@/lib/format';
 import { useChat } from '@/stores/chat';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 function sections(contacts: Contact[]) {
   const map = new Map<string, Contact[]>();
@@ -115,7 +107,13 @@ export default function ContactsScreen() {
             className="flex-row items-center gap-3 px-4 active:bg-fill"
             style={{ height: 64 }}
           >
-            <Avatar id={item.id} name={item.displayName} size={44} online={item.online} />
+            <ProfileAvatar
+              id={item.id}
+              name={item.displayName}
+              size={44}
+              online={item.online}
+              photo={item.photo}
+            />
             <View className="h-full flex-1 justify-center border-b border-separator">
               <Text variant="headline">{item.displayName}</Text>
               <Text variant="footnote" tone={item.online ? 'accent' : 'tertiary'}>

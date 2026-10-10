@@ -74,9 +74,13 @@ export async function waitFor(fn, what, timeoutMs = 180_000) {
   throw new Error(`timed out waiting for ${what}`);
 }
 
-/** Follow the app's Metro log (only lines written after this starts). */
+/**
+ * Follow the app's Metro log. The runners start a fresh Metro (and log) for
+ * each run, so the whole file is this run's: reading from the start means a
+ * line the app wrote while this script was still loading isn't missed.
+ */
 export function metro(path) {
-  const start = readFileSync(path, 'utf8').length;
+  const start = 0;
   const text = () => readFileSync(path, 'utf8').slice(start);
   const waitForLog = (pattern, timeoutMs) =>
     waitFor(() => text().match(pattern), pattern, timeoutMs);
@@ -393,10 +397,13 @@ export async function createPeer({ invite, name, displayName }) {
   const membersOf = async (conversationId) =>
     (await call(`/conversations/${conversationId}`, null, token)).members.map((m) => m.userId);
 
+  /** My profile photo key, sent with every message (as the app does). */
+  let profile = null;
+
   /** Send a payload as an encrypted message (re-encrypting if devices changed). */
   async function send(conversationId, kind, content, extra = {}) {
     const id = randomUUID();
-    const payload = { v: 1, id, conversationId, t: kind, ...content };
+    const payload = { v: 1, id, conversationId, ...(profile && { profile }), t: kind, ...content };
     for (let attempt = 1; ; attempt++) {
       try {
         const envelopes = await encryptFor(
@@ -510,6 +517,28 @@ export async function createPeer({ invite, name, displayName }) {
         }
       }
       return messages.map((m) => ({ m, ...opened.get(m.id) }));
+    },
+
+    /** Set my profile photo: encrypted here, ciphertext uploaded, key sent with my messages. */
+    async setPhoto(jpeg) {
+      const { sealed, key, digest } = sealFile(jpeg);
+      const res = await raw('/me/avatar', token, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: sealed,
+      });
+      if (!res.ok) throw new Error(`avatar upload → ${res.status}`);
+      const { avatarId } = await res.json();
+      profile = { avatar: { id: avatarId, content: { key, digest } } };
+      return profile;
+    },
+
+    /** Download and decrypt someone's profile photo (key from their message). */
+    async downloadPhoto(userId, avatar) {
+      const res = await raw(`/users/${userId}/avatar/${avatar.id}`, token);
+      if (!res.ok) return { status: res.status };
+      const sealed = Buffer.from(await res.arrayBuffer());
+      return { status: res.status, sealed, plain: openFile(sealed, avatar.content) };
     },
 
     /** Download and decrypt an attachment's content or poster. */

@@ -1,7 +1,8 @@
 import { Pressable, View } from 'react-native';
-import { Avatar, Text } from '@/components/ui';
+import { Text } from '@/components/ui';
 import { ME, type Contact, type Conversation } from '@/domain/types';
 import { formatLastSeen } from '@/lib/format';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 export function chatSubtitle(
   c: Conversation,
@@ -46,11 +47,12 @@ export function ChatHeaderTitle({
       accessibilityLabel={`${title}, ${subtitle}. Show details`}
       className="flex-row items-center gap-2.5 active:opacity-70"
     >
-      <Avatar
+      <ProfileAvatar
         id={otherId ?? conversation.id}
         name={title}
         size={34}
         group={conversation.kind === 'group'}
+        photo={otherId ? contacts[otherId]?.photo : undefined}
       />
       <View>
         <Text variant="headline" numberOfLines={1} style={{ maxWidth: 190 }}>

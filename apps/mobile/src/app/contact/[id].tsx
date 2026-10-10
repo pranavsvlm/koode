@@ -3,7 +3,6 @@ import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useMemo } from 'react';
 import { Pressable, ScrollView, View } from 'react-native';
 import {
-  Avatar,
   Icon,
   ListRow,
   ListSection,
@@ -20,6 +19,7 @@ import { useChat } from '@/stores/chat';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import { startCall } from '@/features/calls/startCall';
 import { useSafety } from '@/features/crypto/useSafety';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 function Action({ icon, label, onPress }: { icon: IconName; label: string; onPress: () => void }) {
   return (
@@ -67,7 +67,13 @@ export default function ContactScreen() {
     <ScrollView className="bg-background" contentContainerClassName="gap-7 px-4 pb-16 pt-4">
       <Stack.Screen options={{ ...detailOptions(colors), title: '' }} />
       <View className="items-center gap-1">
-        <Avatar id={contact.id} name={contact.displayName} size={112} online={contact.online} />
+        <ProfileAvatar
+          id={contact.id}
+          name={contact.displayName}
+          size={112}
+          online={contact.online}
+          photo={contact.photo}
+        />
         <Text variant="title1" className="mt-3 text-center">
           {contact.displayName}
         </Text>

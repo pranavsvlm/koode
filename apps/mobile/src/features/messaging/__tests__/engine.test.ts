@@ -9,6 +9,7 @@ import {
   HEARTBEAT_MS,
   MessagingEngine,
   PONG_TIMEOUT_MS,
+  PROBE_TIMEOUT_MS,
   TYPING_THROTTLE_MS,
   TYPING_TTL_MS,
   type MessageCrypto,
@@ -559,6 +560,37 @@ describe('MessagingEngine', () => {
     expect(t.engine.getSnapshot().connection).toBe('offline');
   });
 
+  it('replaces a socket that went dead in the background as soon as the app returns', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    // iOS froze the app: the socket still looks open but nothing answers.
+    t.sockets[0]!.onclose = () => {}; // a dead connection never reports its close
+    t.engine.resume();
+    expect(t.sockets[0]!.sent).toContain('{"type":"ping"}');
+    await t.clock.advance(PROBE_TIMEOUT_MS);
+    await flush();
+    expect(t.sockets).toHaveLength(2); // reconnected without waiting for a heartbeat
+    t.server.post('c1', MAYA, 'sent while frozen');
+    t.socket().open();
+    await flush();
+    expect(t.engine.getSnapshot().connection).toBe('online');
+    expect(bodies(t.engine, 'c1')).toEqual(['sent while frozen']);
+  });
+
+  it('keeps a live socket when the foreground check is answered', async () => {
+    const t = setup();
+    await t.engine.start();
+    await t.online();
+    t.engine.resume();
+    t.socket().receive({ type: 'pong' });
+    await t.clock.advance(PROBE_TIMEOUT_MS);
+    await flush();
+    expect(t.sockets).toHaveLength(1);
+    expect(t.sockets[0]!.closed).toBe(false);
+  });
+
   it('keeps the connection when the server answers the heartbeat', async () => {
     const t = setup();
     await t.engine.start();
@@ -1012,7 +1044,10 @@ describe('MessagingEngine — end-to-end encryption', () => {
     // Restarted with nothing in memory: the copies are only in the cache.
     const again = setup({
       server: t.server,
-      store: { ...t.store, load: async () => ({ conversations: [], messages: [], users: [] }) },
+      store: {
+        ...t.store,
+        load: async () => ({ conversations: [], messages: [], users: [], profiles: [] }),
+      },
     });
     await again.engine.start();
     await again.online();
@@ -1188,5 +1223,97 @@ describe('MessagingEngine — background', () => {
     await flush();
     expect(t.sockets).toHaveLength(2);
     expect(bodies(t.engine, 'c1')).toEqual(['while you were away']);
+  });
+});
+
+describe('MessagingEngine — profile photos', () => {
+  const secret = { key: 'k'.repeat(44), digest: 'd'.repeat(44) };
+  const photo = (id: string) => ({ avatar: { id, content: secret } });
+
+  it('sends my photo key inside my messages', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    await t.engine.start();
+    await t.online();
+    t.engine.send('c1', 'before');
+    await flush();
+    t.engine.setMyProfile(photo('av_first_photo_123456'));
+    t.engine.send('c1', 'after');
+    await flush();
+    const sent = t.server.state.messages
+      .get('c1')!
+      .map((m) => JSON.parse(m.all[0]!.body.slice(4)) as { profile?: unknown });
+    expect(sent[0]!.profile).toBeUndefined();
+    expect(sent[1]!.profile).toEqual(photo('av_first_photo_123456'));
+  });
+
+  it('learns photos from messages, keeps the newest, and remembers them', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    const id = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+    const send = (n: number, avatarId: string) =>
+      t.server.post('c1', MAYA, `m${n}`, {
+        id: id(n),
+        plain: payload(
+          { id: id(n), conversationId: 'c1' },
+          { t: 'text', body: `m${n}`, replyToId: null, profile: photo(avatarId) },
+        ),
+      });
+    send(1, 'av_older_photo_1234567');
+    send(2, 'av_newer_photo_1234567');
+    await t.engine.start();
+    await t.online();
+    await flush();
+    expect(t.engine.getSnapshot().profiles[MAYA]?.profile).toEqual(photo('av_newer_photo_1234567'));
+
+    // An older message read later (scrolling back) doesn't bring the old photo back.
+    t.socket().receive({ type: 'message', message: send(3, 'av_newest_photo_123456') });
+    await flush();
+    expect(t.engine.getSnapshot().profiles[MAYA]?.profile.avatar?.id).toBe(
+      'av_newest_photo_123456',
+    );
+
+    // Persisted: a restart shows it before any message is opened again.
+    const again = setup({ server: t.server, store: t.store });
+    await again.engine.start();
+    expect(again.engine.getSnapshot().profiles[MAYA]?.profile.avatar?.id).toBe(
+      'av_newest_photo_123456',
+    );
+  });
+
+  it('ignores a profile it can’t read, and still opens the message', async () => {
+    const t = setup();
+    t.server.addConversation('c1');
+    t.server.post('c1', MAYA, 'x', {
+      id: '00000000-0000-4000-8000-000000000009',
+      plain: payload(
+        { id: '00000000-0000-4000-8000-000000000009', conversationId: 'c1' },
+        { t: 'text', body: 'x', replyToId: null, profile: { avatar: { id: '../../etc' } } },
+      ),
+    });
+    await t.engine.start();
+    await t.online();
+    await flush();
+    expect(t.engine.getSnapshot().profiles[MAYA]).toBeUndefined();
+    // The message itself still opens (a newer app's format mustn't break older ones).
+    expect(bodies(t.engine, 'c1')).toEqual(['x']);
+  });
+});
+
+describe('MessagingEngine — presence', () => {
+  it('shows people coming online, going offline, and hiding it', async () => {
+    const t = setup();
+    await t.engine.start();
+    await t.online();
+    await flush();
+    const maya = () => t.engine.getSnapshot().users[MAYA]!;
+    t.socket().receive({ type: 'presence', userId: MAYA, online: true, lastSeenAt: 5 });
+    expect(maya()).toMatchObject({ online: true });
+    t.socket().receive({ type: 'presence', userId: MAYA, online: false, lastSeenAt: 9 });
+    expect(maya()).toMatchObject({ online: false, lastSeenAt: 9 });
+    // She chose "Nobody": nothing to show.
+    t.socket().receive({ type: 'presence', userId: MAYA, online: false, lastSeenAt: null });
+    expect(maya().online).toBeUndefined();
+    expect(maya().lastSeenAt).toBeUndefined();
   });
 });

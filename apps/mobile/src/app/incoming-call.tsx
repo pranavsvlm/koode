@@ -3,10 +3,11 @@ import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect } from 'react';
 import { View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Avatar, Text, useToast } from '@/components/ui';
+import { Text, useToast } from '@/components/ui';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
 import { callController, useCall } from '@/features/calls';
 import { setRingingScreenOpen } from '@/features/calls/incoming';
+import { remindToCallBack } from '@/features/notifications';
 import { openConversation } from '@/features/chat/openConversation';
 import { CallControlButton } from '@/features/call/CallControls';
 import { PulseRings } from '@/features/call/PulseRings';
@@ -14,6 +15,7 @@ import type { CallKind } from '@/domain/types';
 import { haptics } from '@/lib/haptics';
 import { useChat } from '@/stores/chat';
 import { callColors } from '@/theme/tokens';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 /**
  * In-app incoming call screen. When the app is in the background, Phase 6
@@ -95,7 +97,12 @@ export default function IncomingCallScreen() {
 
         <View className="items-center">
           <PulseRings size={148} active>
-            <Avatar id={contact.id} name={contact.displayName} size={148} />
+            <ProfileAvatar
+              id={contact.id}
+              name={contact.displayName}
+              size={148}
+              photo={contact.photo}
+            />
           </PulseRings>
         </View>
 
@@ -106,8 +113,24 @@ export default function IncomingCallScreen() {
               label="Remind Me"
               size={52}
               onPress={() => {
+                const callId = callController.getSnapshot().call?.id;
                 decline();
-                toast.show({ title: 'Reminders arrive with notifications (Phase 6)' });
+                if (!live || !callId) {
+                  toast.show({ title: 'Reminder set for 1 hour' });
+                  return;
+                }
+                void remindToCallBack({ callId, callerId: contactId, name: contact.displayName })
+                  .then((ok) =>
+                    toast.show(
+                      ok
+                        ? { title: 'Reminder set for 1 hour', tone: 'success' }
+                        : {
+                            title: 'Turn on notifications to get reminders',
+                            message: 'Settings → Notifications',
+                          },
+                    ),
+                  )
+                  .catch(() => toast.show({ title: 'Couldn’t set a reminder', tone: 'error' }));
               }}
             />
             <CallControlButton

@@ -4,11 +4,16 @@ import type { ImageSourcePropType } from 'react-native';
 /** The signed-in user's id in conversation membership and message senders. */
 export const ME = 'me';
 
+/** A profile photo: where it is and the key to decrypt it. */
+export type AvatarPhoto = { userId: string; id: string; content: FileSecret };
+
 export type Contact = {
   id: string;
   displayName: string;
   username: string;
   about?: string;
+  /** Known once they've written to me (the key comes with their messages). */
+  photo?: AvatarPhoto;
   online?: boolean;
   lastSeenAt?: number;
 };

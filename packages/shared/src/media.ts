@@ -148,3 +148,15 @@ export function attachmentLabel(a: Pick<AttachmentMeta, 'kind' | 'name'>): strin
       return `📄 ${a.name ?? 'Document'}`;
   }
 }
+
+// ——— Profile photos ———
+
+/** A profile photo: a 512 px JPEG, encrypted on the device (ciphertext limit). */
+export const AVATAR_LIMIT = 256 * 1024 + ENCRYPTION_OVERHEAD;
+/** Pixel size the app resizes profile photos to (square). */
+export const AVATAR_PIXELS = 512;
+
+export const AvatarUploadResponse = z.object({
+  avatarId: z.string().regex(/^av_[A-Za-z0-9_-]{16,64}$/),
+});
+export type AvatarUploadResponse = z.infer<typeof AvatarUploadResponse>;

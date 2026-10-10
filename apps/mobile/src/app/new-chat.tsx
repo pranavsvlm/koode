@@ -11,6 +11,7 @@ import { cn } from '@/lib/cn';
 import { useChat } from '@/stores/chat';
 import { MotionView } from '@/components/ui/MotionView';
 import { startCall } from '@/features/calls/startCall';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 type Step = 'pick' | 'name';
 
@@ -135,7 +136,12 @@ export default function NewChatScreen() {
                 key={sid}
                 className="flex-row items-center gap-1.5 rounded-full bg-fill py-1 pl-1 pr-3"
               >
-                <Avatar id={sid} name={contacts[sid]?.displayName ?? ''} size={24} />
+                <ProfileAvatar
+                  id={sid}
+                  name={contacts[sid]?.displayName ?? ''}
+                  size={24}
+                  photo={contacts[sid]?.photo}
+                />
                 <Text variant="footnote">{contacts[sid]?.displayName.split(' ')[0]}</Text>
               </View>
             ))}
@@ -177,7 +183,12 @@ export default function NewChatScreen() {
                     className="items-center gap-1"
                     style={{ width: 56 }}
                   >
-                    <Avatar id={sid} name={contacts[sid]?.displayName ?? ''} size={48} />
+                    <ProfileAvatar
+                      id={sid}
+                      name={contacts[sid]?.displayName ?? ''}
+                      size={48}
+                      photo={contacts[sid]?.photo}
+                    />
                     <Text variant="caption" numberOfLines={1}>
                       {contacts[sid]?.displayName.split(' ')[0]}
                     </Text>
@@ -219,7 +230,13 @@ export default function NewChatScreen() {
                   className="flex-row items-center gap-3 px-4 active:bg-fill"
                   style={{ height: 60 }}
                 >
-                  <Avatar id={item.id} name={item.displayName} size={44} online={item.online} />
+                  <ProfileAvatar
+                    id={item.id}
+                    name={item.displayName}
+                    size={44}
+                    online={item.online}
+                    photo={item.photo}
+                  />
                   <View className="flex-1">
                     <Text variant="headline">{item.displayName}</Text>
                     <Text variant="footnote" tone="tertiary">

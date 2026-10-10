@@ -1,0 +1,8 @@
+{
+  "name": "koode-call-ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "In-call screen behaviour: proximity sensor, Android picture-in-picture and rounded Android video.",
+  "license": "UNLICENSED",
+  "main": "index.ts"
+}

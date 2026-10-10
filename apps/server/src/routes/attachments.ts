@@ -58,7 +58,7 @@ async function readable(db: D1Database, id: string, userId: string): Promise<Att
 }
 
 /** Streams the request body into R2, insisting on the declared length. */
-async function store(
+export async function store(
   c: Context<AppEnv>,
   key: string,
   expected: { size?: number; max: number; contentType: string },

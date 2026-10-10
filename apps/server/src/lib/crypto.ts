@@ -11,7 +11,9 @@ export function randomToken(bytes = 32): string {
 }
 
 /** Opaque, unguessable id such as "usr_4fQ…". */
-export function newId(prefix: 'usr' | 'dev' | 'ses' | 'inv' | 'cnv' | 'cal' | 'att'): string {
+export function newId(
+  prefix: 'usr' | 'dev' | 'ses' | 'inv' | 'cnv' | 'cal' | 'att' | 'av',
+): string {
   return `${prefix}_${randomToken(12)}`;
 }
 

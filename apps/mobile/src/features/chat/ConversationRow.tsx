@@ -1,11 +1,12 @@
 import { memo } from 'react';
 import { Pressable, View } from 'react-native';
-import { Avatar, Badge, Icon, Text } from '@/components/ui';
+import { Badge, Icon, Text } from '@/components/ui';
 import { ME, type Contact } from '@/domain/types';
 import { formatConversationTime } from '@/lib/format';
 import { directContactId, messagePreview, type ConversationSummary } from '@/stores/chat';
 import { MessageStatusIcon } from './MessageStatusIcon';
 import { useThemeColors } from '@/theme/ThemeProvider';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 export const ConversationRow = memo(function ConversationRow({
   summary,
@@ -55,12 +56,13 @@ export const ConversationRow = memo(function ConversationRow({
       className="flex-row items-center gap-3 px-4 active:bg-fill"
       style={{ height: 76 }}
     >
-      <Avatar
+      <ProfileAvatar
         id={otherId ?? c.id}
         name={title}
         size={56}
         online={other?.online}
         group={c.kind === 'group'}
+        photo={other?.photo}
       />
       <View className="h-full flex-1 justify-center gap-0.5 border-b border-separator pr-0.5">
         <View className="flex-row items-center gap-1.5">

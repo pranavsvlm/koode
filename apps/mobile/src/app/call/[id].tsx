@@ -1,12 +1,12 @@
-import { VideoView } from '@livekit/react-native';
+import { VideoTrack } from '@livekit/react-native';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { useEffect, useMemo, useState, type ComponentProps } from 'react';
+import { Platform, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Avatar, Icon, Text } from '@/components/ui';
+import { Icon, Text } from '@/components/ui';
 import { MotionView } from '@/components/ui/MotionView';
 import { devImages } from '@/dev/images';
 import type { CallKind } from '@/domain/types';
@@ -18,9 +18,20 @@ import { SelfView } from '@/features/call/SelfView';
 import { useCallModel } from '@/features/call/useCallModel';
 import { useChat } from '@/stores/chat';
 import { callColors } from '@/theme/tokens';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 const CONTROLS_HEIGHT = 150;
 const FILL = { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 } as const;
+/** iOS: leaving the app during a video call floats the other person's video. */
+const IOS_PIP = {
+  enabled: true,
+  startAutomatically: true,
+  preferredSize: { width: 9, height: 16 },
+};
+/** Android's picture-in-picture window is far narrower than any phone screen. */
+const PIP_MAX_WIDTH = 330;
+
+type TrackRef = ComponentProps<typeof VideoTrack>['trackRef'];
 
 export default function CallScreen() {
   const params = useLocalSearchParams<{ id: string; kind?: CallKind; accepted?: string }>();
@@ -31,6 +42,19 @@ export default function CallScreen() {
     params.accepted === '1',
   );
   const [chromeVisible, setChromeVisible] = useState(true);
+  // Android picture-in-picture: the whole screen shrinks into a small window.
+  const { width } = useWindowDimensions();
+  const floating = Platform.OS === 'android' && width < PIP_MAX_WIDTH;
+  // VideoTrack reads only the publication's track and id.
+  const remoteRef = useMemo(
+    () =>
+      m.remoteVideo
+        ? ({
+            publication: { track: m.remoteVideo, trackSid: m.remoteVideo.sid },
+          } as unknown as TrackRef)
+        : undefined,
+    [m.remoteVideo],
+  );
 
   const video = m.kind === 'video';
   const inCall = m.phase === 'connected' || m.phase === 'reconnecting';
@@ -117,7 +141,13 @@ export default function CallScreen() {
         >
           <Animated.View entering={FadeIn.duration(500)} style={StyleSheet.absoluteFill}>
             {m.live && m.remoteVideo ? (
-              <VideoView videoTrack={m.remoteVideo} style={FILL} objectFit="cover" zOrder={0} />
+              <VideoTrack
+                trackRef={remoteRef}
+                style={FILL}
+                objectFit="cover"
+                zOrder={0}
+                iosPIP={IOS_PIP}
+              />
             ) : (
               <Image
                 source={devImages.forest.source}
@@ -131,80 +161,87 @@ export default function CallScreen() {
         <CallBackdrop id={contact.id} />
       )}
 
-      <SafeAreaView className="flex-1" edges={['top', 'bottom']} pointerEvents="box-none">
-        {(!showRemote || chromeVisible) && (
-          <MotionView
-            entering={FadeIn.duration(200)}
-            exiting={FadeOut.duration(200)}
-            className={
-              showRemote ? 'items-center pt-3' : 'flex-1 items-center justify-center gap-4'
-            }
-            pointerEvents="box-none"
-          >
-            {!showRemote && (
-              <PulseRings size={136} active={m.phase === 'calling' || m.phase === 'ringing'}>
-                <Avatar id={contact.id} name={name} size={136} />
-              </PulseRings>
-            )}
-            <View
+      {!floating && (
+        <SafeAreaView className="flex-1" edges={['top', 'bottom']} pointerEvents="box-none">
+          {(!showRemote || chromeVisible) && (
+            <MotionView
+              entering={FadeIn.duration(200)}
+              exiting={FadeOut.duration(200)}
               className={
-                showRemote
-                  ? 'items-center rounded-full bg-black/35 px-4 py-1.5'
-                  : 'mt-4 items-center gap-1'
+                showRemote ? 'items-center pt-3' : 'flex-1 items-center justify-center gap-4'
               }
+              pointerEvents="box-none"
             >
-              <Text variant={showRemote ? 'headline' : 'title1'} style={{ color: callColors.text }}>
-                {name}
-              </Text>
-              <Pressable
-                onLongPress={__DEV__ ? m.simulateReconnect : undefined}
-                accessibilityHint={
-                  __DEV__ && m.simulateReconnect ? 'Long press to simulate a reconnect' : undefined
+              {!showRemote && (
+                <PulseRings size={136} active={m.phase === 'calling' || m.phase === 'ringing'}>
+                  <ProfileAvatar id={contact.id} name={name} size={136} photo={contact.photo} />
+                </PulseRings>
+              )}
+              <View
+                className={
+                  showRemote
+                    ? 'items-center rounded-full bg-black/35 px-4 py-1.5'
+                    : 'mt-4 items-center gap-1'
                 }
               >
-                <CallStatus
-                  phase={m.phase}
-                  seconds={m.seconds}
-                  endedLabel={m.endedLabel}
-                  weak={m.quality === 'poor'}
-                />
-              </Pressable>
-            </View>
-            {m.encrypted && (m.phase === 'connected' || m.phase === 'reconnecting') && (
-              <View
-                className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1"
-                accessibilityLabel="End-to-end encrypted"
-              >
-                <Icon name="lock" size={12} color={callColors.textSecondary} />
-                <Text variant="caption" style={{ color: callColors.textSecondary }}>
-                  End-to-end encrypted
+                <Text
+                  variant={showRemote ? 'headline' : 'title1'}
+                  style={{ color: callColors.text }}
+                >
+                  {name}
                 </Text>
+                <Pressable
+                  onLongPress={__DEV__ ? m.simulateReconnect : undefined}
+                  accessibilityHint={
+                    __DEV__ && m.simulateReconnect
+                      ? 'Long press to simulate a reconnect'
+                      : undefined
+                  }
+                >
+                  <CallStatus
+                    phase={m.phase}
+                    seconds={m.seconds}
+                    endedLabel={m.endedLabel}
+                    weak={m.quality === 'poor'}
+                  />
+                </Pressable>
               </View>
-            )}
-            {m.cameraUnavailable && (
-              <View className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1">
-                <Icon name="video-off" size={13} color={callColors.textSecondary} />
-                <Text variant="caption" style={{ color: callColors.textSecondary }}>
-                  Camera unavailable
-                </Text>
-              </View>
-            )}
-          </MotionView>
-        )}
-        {showRemote && <View className="flex-1" pointerEvents="none" />}
+              {m.encrypted && (m.phase === 'connected' || m.phase === 'reconnecting') && (
+                <View
+                  className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1"
+                  accessibilityLabel="End-to-end encrypted"
+                >
+                  <Icon name="lock" size={12} color={callColors.textSecondary} />
+                  <Text variant="caption" style={{ color: callColors.textSecondary }}>
+                    End-to-end encrypted
+                  </Text>
+                </View>
+              )}
+              {m.cameraUnavailable && (
+                <View className="mt-2 flex-row items-center gap-1.5 rounded-full bg-black/35 px-3 py-1">
+                  <Icon name="video-off" size={13} color={callColors.textSecondary} />
+                  <Text variant="caption" style={{ color: callColors.textSecondary }}>
+                    Camera unavailable
+                  </Text>
+                </View>
+              )}
+            </MotionView>
+          )}
+          {showRemote && <View className="flex-1" pointerEvents="none" />}
 
-        {(!showRemote || chromeVisible) && (
-          <MotionView
-            entering={FadeIn.duration(200)}
-            exiting={FadeOut.duration(200)}
-            className="pb-2"
-          >
-            <CallControls controls={controls} onEnd={m.hangUp} />
-          </MotionView>
-        )}
-      </SafeAreaView>
+          {(!showRemote || chromeVisible) && (
+            <MotionView
+              entering={FadeIn.duration(200)}
+              exiting={FadeOut.duration(200)}
+              className="pb-2"
+            >
+              <CallControls controls={controls} onEnd={m.hangUp} />
+            </MotionView>
+          )}
+        </SafeAreaView>
+      )}
 
-      {video && (
+      {video && !floating && (
         <SelfView
           cameraOn={m.cameraOn}
           track={m.localVideo}

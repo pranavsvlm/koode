@@ -141,6 +141,7 @@ export function measureDerive() {
     conversations,
     messages,
     users: {},
+    profiles: {},
     typing: {},
     hasMore: {},
     progress: {},

@@ -2,7 +2,6 @@ import { router, Stack } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { FlatList, Pressable, View } from 'react-native';
 import {
-  Avatar,
   EmptyState,
   Icon,
   IconButton,
@@ -14,6 +13,7 @@ import type { CallRecord } from '@/domain/types';
 import { formatCallLength, formatConversationTime } from '@/lib/format';
 import { useChat } from '@/stores/chat';
 import { startCall } from '@/features/calls/startCall';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 const FILTERS = [
   { value: 'all', label: 'All' },
@@ -91,7 +91,12 @@ export default function CallsScreen() {
                 className="flex-1 flex-row items-center gap-3 active:opacity-70"
                 style={{ height: 68 }}
               >
-                <Avatar id={contact.id} name={contact.displayName} size={44} />
+                <ProfileAvatar
+                  id={contact.id}
+                  name={contact.displayName}
+                  size={44}
+                  photo={contact.photo}
+                />
                 <View className="h-full flex-1 justify-center border-b border-separator">
                   <Text variant="headline" tone={missed ? 'danger' : 'primary'} numberOfLines={1}>
                     {contact.displayName}

@@ -154,6 +154,12 @@ export const PublicUser = z.object({
   username: z.string(),
   displayName: z.string(),
   about: z.string(),
+  /**
+   * Presence, only for people I share a chat with, and only if we both show
+   * it (hiding mine hides theirs, as with read receipts). Absent otherwise.
+   */
+  online: z.boolean().optional(),
+  lastSeenAt: z.number().int().nullable().optional(),
 });
 export type PublicUser = z.infer<typeof PublicUser>;
 export const UserDirectory = z.object({ users: z.array(PublicUser) });
@@ -177,6 +183,13 @@ export const ServerEvent = z.discriminatedUnion('type', [
   z.object({ type: z.literal('conversation'), conversationId: z.string() }),
   /** A call you're part of was created or changed state. */
   z.object({ type: z.literal('call'), call: Call }),
+  /** Someone you share a chat with came online or went offline. */
+  z.object({
+    type: z.literal('presence'),
+    userId: z.string(),
+    online: z.boolean(),
+    lastSeenAt: z.number().int().nullable(),
+  }),
 ]);
 export type ServerEvent = z.infer<typeof ServerEvent>;
 

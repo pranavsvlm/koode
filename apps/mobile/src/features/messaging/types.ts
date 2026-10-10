@@ -3,6 +3,7 @@ import type {
   ConversationSummary,
   CreateAttachmentRequest,
   FileSecret,
+  ProfileSecret,
   PublicUser,
   Reaction,
   SystemEvent,
@@ -103,6 +104,12 @@ export function normalizeMessage(
   };
 }
 
+/**
+ * Someone's profile photo key, learned from their newest message (`at`: when
+ * that message was sent, so an older message never overrides a newer photo).
+ */
+export type StoredProfile = { userId: string; profile: ProfileSecret; at: number };
+
 export type Snapshot = {
   connection: 'connecting' | 'online' | 'offline';
   /** Newest activity first. */
@@ -110,6 +117,8 @@ export type Snapshot = {
   /** Per conversation, oldest → newest. */
   messages: Record<string, LocalMessage[]>;
   users: Record<string, PublicUser>;
+  /** Profile photo keys by user id (mine included). */
+  profiles: Record<string, StoredProfile>;
   /** User ids currently typing, per conversation. */
   typing: Record<string, string[]>;
   /** Whether older history exists on the server, per conversation. */
@@ -124,9 +133,11 @@ export interface MessagingStore {
     conversations: ConversationSummary[];
     messages: LocalMessage[];
     users: PublicUser[];
+    profiles: StoredProfile[];
   }>;
   saveConversations(conversations: ConversationSummary[]): Promise<void>;
   saveUsers(users: PublicUser[]): Promise<void>;
+  saveProfile(profile: StoredProfile): Promise<void>;
   saveMessages(messages: LocalMessage[]): Promise<void>;
   /** Cached copies by id (including ones not loaded at start-up). */
   getMessages(ids: string[]): Promise<LocalMessage[]>;
@@ -142,14 +153,17 @@ export function memoryStore(): MessagingStore & { dump: () => { messages: LocalM
   const conversations = new Map<string, ConversationSummary>();
   const users = new Map<string, PublicUser>();
   const messages = new Map<string, LocalMessage>();
+  const profiles = new Map<string, StoredProfile>();
   return {
     load: async () => ({
       conversations: [...conversations.values()],
       messages: [...messages.values()],
       users: [...users.values()],
+      profiles: [...profiles.values()],
     }),
     saveConversations: async (list) => list.forEach((c) => conversations.set(c.id, c)),
     saveUsers: async (list) => list.forEach((u) => users.set(u.id, u)),
+    saveProfile: async (p) => void profiles.set(p.userId, p),
     saveMessages: async (list) => list.forEach((m) => messages.set(m.id, m)),
     getMessages: async (ids) => ids.flatMap((id) => (messages.has(id) ? [messages.get(id)!] : [])),
     olderMessages: async (conversationId, beforeSeq, limit) =>
@@ -166,6 +180,7 @@ export function memoryStore(): MessagingStore & { dump: () => { messages: LocalM
       conversations.clear();
       users.clear();
       messages.clear();
+      profiles.clear();
     },
     dump: () => ({ messages: [...messages.values()] }),
   };

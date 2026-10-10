@@ -1,8 +1,9 @@
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
 import { Pressable, ScrollView, View } from 'react-native';
-import { Avatar, Icon, ListRow, ListSection, Text, useDialog } from '@/components/ui';
+import { Icon, ListRow, ListSection, Text, useDialog } from '@/components/ui';
 import { useDevSettings } from '@/dev/settings';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 import { env } from '@/lib/env';
 import { useServerHealth } from '@/lib/useServerHealth';
 import { useChat } from '@/stores/chat';
@@ -12,6 +13,7 @@ import { accents } from '@/theme/tokens';
 
 export default function SettingsScreen() {
   const profile = useSession((s) => s.user);
+  const myPhoto = useChat((s) => s.myPhoto);
   const signOut = useSession((s) => s.signOut);
   const appearance = usePreferences((s) => s.appearance);
   const accent = usePreferences((s) => s.accent);
@@ -29,7 +31,12 @@ export default function SettingsScreen() {
         accessibilityLabel={`${profile?.displayName}, @${profile?.username}. Edit profile`}
         className="flex-row items-center gap-4 rounded-xl bg-surface p-4 active:opacity-80"
       >
-        <Avatar id={profile?.username ?? 'me'} name={profile?.displayName ?? 'You'} size={64} />
+        <ProfileAvatar
+          id={profile?.username ?? 'me'}
+          name={profile?.displayName ?? 'You'}
+          size={64}
+          photo={myPhoto}
+        />
         <View className="flex-1 gap-0.5">
           <Text variant="title3">{profile?.displayName}</Text>
           <Text variant="subhead" tone="secondary">

@@ -2,7 +2,7 @@ import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, View } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
-import { Avatar, Button, EmptyState, IconButton, Text, useToast } from '@/components/ui';
+import { Button, EmptyState, IconButton, Text, useToast } from '@/components/ui';
 import { ME, type Message } from '@/domain/types';
 import { ChatHeaderTitle } from '@/features/chat/ChatHeaderTitle';
 import { Composer } from '@/features/chat/Composer';
@@ -22,6 +22,7 @@ import { usePreferences } from '@/stores/preferences';
 import { useThemeColors } from '@/theme/ThemeProvider';
 import { startCall } from '@/features/calls/startCall';
 import { setViewingConversation } from '@/features/notifications';
+import { ProfileAvatar } from '@/features/profile/ProfileAvatar';
 
 const EMPTY: Message[] = [];
 
@@ -223,10 +224,19 @@ export default function ConversationScreen() {
             ),
         }}
       />
-      <KeyboardAvoidingView behavior="padding" className="flex-1">
+      {/* automaticOffset: measure the real position below the header. Without it
+          the padding comes up short by the header's height and the keyboard
+          covers the composer. */}
+      <KeyboardAvoidingView behavior="padding" automaticOffset className="flex-1">
         {items.length === 0 ? (
           <View className="flex-1 items-center justify-center gap-3 px-10">
-            <Avatar id={otherId ?? id} name={title} size={88} group={isGroup} />
+            <ProfileAvatar
+              id={otherId ?? id}
+              name={title}
+              size={88}
+              group={isGroup}
+              photo={!isGroup && otherId ? contacts[otherId]?.photo : undefined}
+            />
             <Text variant="title3" className="text-center">
               {title}
             </Text>

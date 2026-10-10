@@ -1,4 +1,4 @@
-import type { VideoTrack } from 'livekit-client';
+import { createLocalVideoTrack, type LocalVideoTrack, type VideoTrack } from 'livekit-client';
 import { useEffect, useMemo, useState } from 'react';
 import type { CallKind } from '@/domain/types';
 import { callController, useCall, type EndReason } from '@/features/calls';
@@ -100,6 +100,32 @@ function useLiveModel(): CallModel {
   };
 }
 
+/**
+ * Sample mode shows the real camera in the self-view when there is one (not on
+ * the iOS Simulator), so the preview can be reviewed without a call.
+ */
+function useSampleCamera(on: boolean, front: boolean): LocalVideoTrack | undefined {
+  const [track, setTrack] = useState<LocalVideoTrack>();
+  useEffect(() => {
+    if (!on) return;
+    let made: LocalVideoTrack | undefined;
+    let cancelled = false;
+    createLocalVideoTrack({ facingMode: front ? 'user' : 'environment' })
+      .then((t) => {
+        made = t;
+        if (cancelled) t.stop();
+        else setTrack(t);
+      })
+      .catch(() => {}); // no camera: the placeholder stays
+    return () => {
+      cancelled = true;
+      made?.stop();
+      setTrack(undefined);
+    };
+  }, [on, front]);
+  return track;
+}
+
 /** Design-review simulation (sample data mode). */
 function useSampleModel(peerId: string, initialKind: CallKind, accepted: boolean): CallModel {
   const addCall = useChat((s) => s.addCall);
@@ -111,6 +137,7 @@ function useSampleModel(peerId: string, initialKind: CallKind, accepted: boolean
   const [frontCamera, setFrontCamera] = useState(true);
   const [startedAt] = useState(() => Date.now());
   const connected = sim.phase === 'connected' || sim.phase === 'reconnecting';
+  const localVideo = useSampleCamera(cameraOn, frontCamera);
 
   return {
     live: false,
@@ -124,6 +151,7 @@ function useSampleModel(peerId: string, initialKind: CallKind, accepted: boolean
     quality: sim.phase === 'reconnecting' ? 'lost' : 'good',
     cameraUnavailable: false,
     encrypted: false,
+    localVideo,
     toggleMic: () => setMicOn((m) => !m),
     toggleCamera: () => {
       if (kind === 'voice') {

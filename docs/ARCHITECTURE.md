@@ -206,6 +206,50 @@ app ◄──WebSocket events──── UserSocket DO ◄───────
   per-device ciphertext envelopes; see "End-to-end encryption" below. Rows from
   before Phase 8 keep `encryption = 'none'`.
 
+### Connection health and presence (Phase 11)
+
+- **Frozen sockets:**
+  - iOS freezes a background app without closing its WebSocket. On returning, the
+    app pings at once, and if nothing answers within 3 s (`PROBE_TIMEOUT_MS`) it
+    replaces the socket. Before, it waited for the next heartbeat and its timeout
+    (up to 35 s), and messages and receipts didn't arrive live meanwhile.
+  - A socket that stops answering is dropped without waiting for its close event,
+    which a dead TCP connection may never deliver.
+- **Presence:**
+  - `UserSocket` records `users.online` / `last_seen_at` (migration `0009`) when a
+    user's first device connects and their last one disconnects.
+  - Changes go to people who share a chat with them (`src/presence.ts`).
+  - An alarm closes connections that sent nothing for 75 s (`STALE_AFTER_MS`, code
+    4002), so a frozen phone shows offline within about 2 minutes.
+  - **Visibility:** `last_seen_visibility` (`contacts` | `nobody`, from Privacy
+    settings) is mutual. Hiding mine hides everyone else's from me, and switching
+    to "Nobody" tells partners there is nothing to show.
+  - The directory includes `online` / `lastSeenAt` only where both allow it.
+
+### Profile photos (Phase 11)
+
+- **On the device:**
+  - The photo is cropped square, resized to 512 px, and re-encoded as JPEG, which
+    drops EXIF such as location.
+  - It's encrypted with a fresh AES-256-GCM key (the same file format as
+    attachments).
+- **On the server:** `PUT /v1/me/avatar` stores the ciphertext in R2 under
+  `avatar/<user>/<avatar id>`, and a new upload deletes the old one.
+- **The key** travels like Signal's profile key: every message payload carries the
+  sender's `profile: {avatar: {id, content: {key, digest}}}`, encrypted with the
+  message.
+  - Whoever the person has written to can fetch and decrypt the photo; the server
+    and everyone else can't.
+  - Receivers keep the newest profile per sender (by message time, so scrolling back
+    never restores an old photo), in the SQLite cache (`profiles`).
+  - A profile field a version can't parse is ignored, and the message still opens.
+- **Download:** `features/profile/photos.ts` downloads each photo once, checks its
+  digest, decrypts it into `Caches/avatars/` and serves it from there. It's erased
+  at sign-out.
+- **Display:** `ProfileAvatar` shows the photo, or initials until it's known.
+- **Limitation:** someone you haven't written to since changing your photo still
+  sees the old one (or initials), as with Signal.
+
 ## Media and groups (implemented, Phase 7)
 
 ### Attachments
@@ -348,7 +392,37 @@ One-to-one voice and video calls. Group calls are not in scope yet.
   media key, which travels only in Signal envelopes. The SFU forwards ciphertext. See
   "End-to-end encryption" below.
 - **Hosting:** development uses a local `livekit-server --dev` (no account, no cost).
-  LiveKit Cloud or a self-hosted server for real use is **pending your approval**.
+  The deployed server uses the owner's LiveKit Cloud project (Phase 10+).
+- **Video quality (Phase 11):** 540p capture with simulcast layers at 360p and 180p.
+  The SFU forwards the layer each receiver's network can carry (`dynacast`,
+  `adaptiveStream`), and `degradationPreference: 'balanced'` lowers resolution and
+  frame rate together on a weak uplink. 720p, the LiveKit default, lagged on phones
+  once every frame was also encrypted.
+- **Call screen behaviour (Phase 11):** `CallEffects` (root layout) derives what the
+  screen does from the call state (`callScreenEffects`, unit-tested):
+  - **Keep awake:** the screen never dims or locks while ringing or in a call
+    (`expo-keep-awake`).
+  - **Proximity:** voice calls on the earpiece turn the screen off at the ear, so a
+    cheek can't press buttons (`modules/koode-call-ui`; iOS
+    `isProximityMonitoringEnabled`, Android `PROXIMITY_SCREEN_OFF_WAKE_LOCK`).
+  - **Picture-in-picture:**
+    - **iOS:** the remote video is LiveKit's `VideoTrack` with `iosPIP`
+      (`startAutomatically`), so leaving the app floats it. iOS pauses the camera in
+      the background, so the other person sees a still frame until you return.
+    - **Android:** `koode-call-ui` sets `PictureInPictureParams` (auto-enter on
+      Android 12+; `onUserLeaveHint` before that) while a video call is connected.
+      The manifest flag comes from expo-video's `supportsPictureInPicture`. In the
+      small window the call screen shows only the video. When the call ends, the
+      window closes.
+  - **Rounded Android self-view:** Android's WebRTC view is a `SurfaceView`, which
+    ignores rounded clipping. `KoodeVideoView` (Kotlin) renders the same frames
+    with WebRTC's `EglRenderer` into a `TextureView` clipped to a rounded outline.
+    Its track lookup uses a small helper in react-native-webrtc's package
+    (`com.oney.WebRTCModule.KoodeVideoTracks`), because the lookup is
+    package-private there.
+- **Calls that rang while the app was frozen (Phase 11):** on returning to the
+  foreground and after any reconnect, the app re-reads `/v1/calls`, rings a call
+  that's still ringing, and closes a ringing screen whose call ended meanwhile.
 
 ## Notifications (implemented, Phase 6)
 
@@ -597,7 +671,8 @@ Interoperability was tested against Signal's Node implementation
 ### Still visible to the server
 
 Who talks to whom and when; message sizes; group membership and titles; display
-names and profiles; call times and
+names and the "about" text (not profile photos, which are encrypted); when each
+person is online (presence, Phase 11); call times and
 durations; IP addresses; ciphertext sizes (so roughly how long a message or file
 is); which message a reaction is for (not the emoji). Messages sent before Phase 8
 stay plaintext on the server (development data only). Ciphertext is kept with its

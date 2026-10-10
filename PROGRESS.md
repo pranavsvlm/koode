@@ -1,26 +1,147 @@
 # Progress
 
-| Phase | Scope                    | Status                                                               |
-| ----- | ------------------------ | -------------------------------------------------------------------- |
-| 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2)               |
-| 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator                        |
-| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator                        |
-| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator                  |
-| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator                  |
-| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator                        |
-| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator                       |
-| 8     | Security and E2EE        | ✅ Complete on iOS; interop E2E on the Simulator (Android: Phase 10) |
-| 9     | Performance and testing  | ✅ Complete; 53 device checks on the iOS 27 Simulator                |
-| 10    | Builds and distribution  | ✅ Complete; local builds verified; nothing uploaded or submitted    |
+| Phase | Scope                     | Status                                                                   |
+| ----- | ------------------------- | ------------------------------------------------------------------------ |
+| 1     | Project foundation        | ✅ Complete (Simulator launch verified during Phase 2)                   |
+| 2     | Premium UI/UX             | ✅ Complete; verified on the iOS 27 Simulator                            |
+| 3     | Authentication            | ✅ Complete; verified on the iOS 27 Simulator                            |
+| 4     | Real-time messaging       | ✅ Complete; two-party test on the iOS 27 Simulator                      |
+| 5     | Voice and video calling   | ✅ Complete; two-party test on the iOS 27 Simulator                      |
+| 6     | Notifications             | ✅ Complete; push E2E on the iOS 27 Simulator                            |
+| 7     | Media and group features  | ✅ Complete; media E2E on the iOS 27 Simulator                           |
+| 8     | Security and E2EE         | ✅ Complete on iOS; interop E2E on the Simulator (Android: Phase 10)     |
+| 9     | Performance and testing   | ✅ Complete; 53 device checks on the iOS 27 Simulator                    |
+| 10    | Builds and distribution   | ✅ Complete; local builds verified; nothing uploaded or submitted        |
+| 11    | Fixes from device testing | ✅ Complete; 62 device checks on the Simulator; real-device items listed |
 
 **E2EE status:**
 
-- **iOS:** messages, attachments, reactions and calls are end-to-end encrypted with
-  libsignal, verified against Signal's Node implementation.
+- **iOS:** messages, attachments, reactions, calls and (Phase 11) profile photos are
+  end-to-end encrypted with libsignal, verified against Signal's Node implementation.
 - **Android** (emulator): messages, attachments, reactions, safety numbers and the
   call key are verified the same way. **Encrypted call media isn't**, because the
   emulator's call didn't connect.
 - **Not independently reviewed:** don't use Koode for sensitive conversations yet.
+
+---
+
+## Phase 11: Fixes from the first real-device test (2026-10-10)
+
+The owner used Koode on an iPhone (free Apple ID build) and an Android phone
+(APK) against the deployed server. They reported nine issues; each one was
+reproduced or traced to a cause, then fixed.
+
+| Reported                                      | Cause                                                                                                                                                                                                                                  | Fix                                                                                                                                                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Keyboard covers what I type**               | The chat's keyboard-avoiding view measured itself as if it started at the top of the screen, so it came up short by the header's height and hid the composer (reproduced on the Android emulator; the Simulator used the Mac keyboard) | `automaticOffset` (measures the real position)                                                                                                                                                          |
+| **Online, but one tick**                      | Delivery receipts work (checked live). On a phone, iOS freezes a background app without closing its WebSocket; on return the app trusted the dead socket for up to 35 s, so messages and ticks didn't arrive live                      | On returning, the app pings and replaces a socket that doesn't answer within 3 s. Dead sockets are dropped without waiting for a close event                                                            |
+| **"Online" status**                           | Presence was never built for real accounts (only sample data showed it)                                                                                                                                                                | Real presence: online and "last seen" for people you share a chat with, mutual "Nobody" (Privacy setting now synced to the server), frozen phones shown offline within about 2 min                      |
+| **Incoming video call didn't pop up**         | In the open app it does (verified). A call that started while the app was frozen sent its event to the dead socket. The builds also have no push yet (free Apple ID; no Firebase)                                                      | Calls are re-read on return and after any reconnect: a still-ringing call rings, a stale ringing screen closes. **Background ringing still needs push** (Apple Developer Program, Firebase)             |
+| **Screen turns off during a call**            | Nothing kept the screen awake                                                                                                                                                                                                          | Keep-awake while ringing and in a call. Voice calls on the earpiece use the proximity sensor (screen off at the ear)                                                                                    |
+| **No picture-in-picture**                     | Not implemented                                                                                                                                                                                                                        | iOS: LiveKit's `VideoTrack` with automatic PiP. Android: a new native module enters PiP when you leave a connected video call (Android 12+ automatically), with a video-only layout in the small window |
+| **Video lags; quality should follow network** | 720p capture with every frame encrypted was heavy on phones; one layer only                                                                                                                                                            | 540p capture, simulcast (540/360/180p) with the server forwarding what each network carries, `balanced` degradation                                                                                     |
+| **Android preview square, iPhone rounded**    | Android WebRTC renders into a `SurfaceView`, which ignores clipping                                                                                                                                                                    | `KoodeVideoView`: the same frames in a `TextureView` with a rounded outline (verified on the emulator)                                                                                                  |
+| **Profile photo**                             | Never built (a Phase 2 placeholder said "Phase 7", and Phase 7 missed it; the phase reports didn't list it — a reporting mistake)                                                                                                      | **End-to-end encrypted profile photos** (Signal's model): 512 px JPEG without EXIF, encrypted on the device, ciphertext on the server, key inside every message                                         |
+
+Also:
+
+- **"Remind Me"** on the incoming-call screen now declines and schedules a local
+  "Call <name> back" notification for an hour later (it was a placeholder).
+- **Test harness:** the peer reads the whole Metro log (a slow start missed early
+  lines), and the runners close the app before restarting Metro.
+- **New device checks:** delivery on arrival, the sender's ✓✓, photos both ways,
+  and presence.
+
+### Delivered
+
+- **Server:**
+  - migration `0009_presence.sql` (`users.online`, `last_seen_at`,
+    `last_seen_visibility`);
+  - `src/presence.ts`; `UserSocket` presence, plus a stale-connection sweep (alarm,
+    75 s, close code 4002);
+  - `PUT` / `DELETE /v1/me/avatar` and `GET /v1/users/:id/avatar/:avatarId`
+    (ciphertext only; account deletion removes the photo);
+  - `PATCH /v1/me {lastSeen}`; `GET /v1/users` with presence where allowed; the
+    `presence` realtime event.
+- **Shared:** `ProfileSecret` in every payload (optional; an unreadable one is
+  ignored so the message still opens), `AvatarUploadResponse`, `AVATAR_LIMIT`,
+  `LastSeenVisibility`, presence fields and event.
+- **App:**
+  - `features/profile/` (`photos.ts` download/decrypt cache, `upload.ts`,
+    `ProfileAvatar`) at every place a person is shown;
+  - Settings → Profile: Add / Change / Remove photo;
+  - engine: profiles (newest wins, SQLite `profiles` table), foreground probe,
+    `dropSocket`, presence events;
+  - `CallEffects` (keep-awake, proximity, Android PiP), call screen PiP;
+  - `SelfView` uses `KoodeVideoView` on Android;
+  - new LiveKit video options; chat `automaticOffset`; calls re-read on resume and
+    reconnect; "Remind Me".
+- **Native:** `modules/koode-call-ui`:
+  - iOS (Swift): proximity;
+  - Android (Kotlin): proximity, PiP, `KoodeVideoView`, plus a small Java helper in
+    react-native-webrtc's package for its package-private track lookup;
+  - `expo-keep-awake` added;
+  - expo-video's `supportsPictureInPicture` sets the Android manifest flag.
+
+### Verification
+
+| Check                                                                                                                                                                                                                                                                                                                                  | Result                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| `pnpm check` (types, lint, Prettier, all tests)                                                                                                                                                                                                                                                                                        | ✅ Pass               |
+| Shared / push relay / server / mobile tests                                                                                                                                                                                                                                                                                            | ✅ 33 / 6 / 109 / 206 |
+| New tests:<br>• server: avatar upload/replace/delete, account deletion removes it, presence (online/offline/last seen, hidden from non-partners, mutual "Nobody");<br>• engine: foreground probe replaces a frozen socket, photo keys sent/learned/newest wins/persisted/unreadable ignored, presence events;<br>• call-screen effects | ✅                    |
+| **iOS device suites on a fresh development build** (iOS 27 Simulator): messaging 9/9 (now with delivery on arrival, ✓✓, photos both ways, presence), calls 7/7, push 5/5, media 11/11, E2EE 17/17, resilience 13/13                                                                                                                    | ✅ **62/62**          |
+| Keyboard: composer above the on-screen keyboard (Android emulator; before: hidden)                                                                                                                                                                                                                                                     | ✅                    |
+| Android build with the new native module; rounded self-view with the emulator camera (`KoodeVideoView`)                                                                                                                                                                                                                                | ✅                    |
+| Native iOS build with the new module and keep-awake                                                                                                                                                                                                                                                                                    | ✅                    |
+
+### Not verified
+
+- **Anything needing real hardware:**
+  - **picture-in-picture**, on iOS and Android;
+  - the **proximity sensor**;
+  - **keep-awake** (not observable on a Simulator);
+  - the **video quality changes** on a real network.
+
+  There's no camera on the iOS Simulator, and Android calls don't connect on the
+  emulator. This needs the owner's phones.
+
+- **Keyboard on iOS:** fixed by the same code, but this Simulator only uses the Mac
+  keyboard, so the iOS on-screen case wasn't seen.
+- **The 75 s stale-connection sweep:** not exercised by a test (it needs real time
+  to pass). The foreground probe it complements is unit-tested.
+- **"Remind Me":** the reminder notification wasn't seen firing.
+- **On Android:** photos and presence weren't run. The Android messaging suite
+  wasn't run in this phase.
+- **The photo picker UI:** the test sets the photo through the same function, not by
+  picking.
+- **The deployed server:** not updated yet (needs migration `0009` and a deploy, both
+  run by the owner). **Until then, the new app's photo upload and presence don't
+  work against it.**
+
+### Known issues and limitations
+
+- **Background ringing and notifications** still need push: the Apple Developer
+  Program for iPhone (the free-ID build can't receive pushes), and a Firebase project
+  plus the push relay for Android.
+- **Old photos:** someone you haven't written to since you changed your photo still
+  sees the old one, or your initials.
+- **Still placeholders:**
+  - **Block** on a contact's page;
+  - **linking a device** with a QR code. Recovery with the key works.
+- **iOS PiP:** the other person sees a still frame while you're in another app (iOS
+  pauses the camera).
+
+### Manual configuration required
+
+- **Deploy the server:**
+  `pnpm --filter @koode/server db:migrate:remote` (adds 0009), then
+  `pnpm --filter @koode/server run deploy:remote`.
+- **Reinstall the apps:**
+  - iPhone: rebuild with free signing (`docs/RELEASE.md`);
+  - Android: the new APK.
+
+  The new native module needs a rebuild; an update over the air isn't enough.
 
 ---
 

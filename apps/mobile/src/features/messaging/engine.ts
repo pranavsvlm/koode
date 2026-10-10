@@ -11,6 +11,7 @@ import {
   type Message,
   type MessagePage,
   type OutgoingEnvelope,
+  type ProfileSecret,
   type PublicUser,
   type ReceiptRequest,
   type SendMessageRequest,
@@ -26,6 +27,7 @@ import {
   type ReactionMark,
   type SealedFile,
   type Snapshot,
+  type StoredProfile,
 } from './types';
 
 /** Server API surface the engine needs (authenticated). */
@@ -113,6 +115,8 @@ export type EngineDeps = {
 
 export const HEARTBEAT_MS = 25_000;
 export const PONG_TIMEOUT_MS = 10_000;
+/** Back in the foreground: how long a possibly frozen socket gets to answer. */
+export const PROBE_TIMEOUT_MS = 3_000;
 export const TYPING_TTL_MS = 5_000;
 export const TYPING_THROTTLE_MS = 3_000;
 export const RECEIPT_DEBOUNCE_MS = 400;
@@ -177,9 +181,18 @@ function mismatchOf(e: unknown): Mismatch | null {
   return parsed.success ? parsed.data : null;
 }
 
-/** What a send says, inside the envelopes. */
-function payloadFor(m: LocalMessage, upload: LocalUpload | null): Payload {
-  const bound = { v: 1 as const, id: m.id, conversationId: m.conversationId };
+/** What a send says, inside the envelopes (with my profile photo key, if I have one). */
+function payloadFor(
+  m: LocalMessage,
+  upload: LocalUpload | null,
+  profile: ProfileSecret | undefined,
+): Payload {
+  const bound = {
+    v: 1 as const,
+    id: m.id,
+    conversationId: m.conversationId,
+    ...(profile ? { profile } : {}),
+  };
   if (m.kind === 'reaction')
     return { ...bound, t: 'reaction', targetId: m.targetId!, emoji: m.body || null };
   if (!upload) return { ...bound, t: 'text', body: m.body, replyToId: m.replyToId };
@@ -271,6 +284,7 @@ export class MessagingEngine {
     conversations: [],
     messages: {},
     users: {},
+    profiles: {},
     typing: {},
     hasMore: {},
     progress: {},
@@ -340,7 +354,7 @@ export class MessagingEngine {
     // A broken cache must not stop messaging: fall back to server-only.
     const cached = await this.deps.store.load().catch((e: unknown) => {
       if (__DEV__) console.warn(`[messaging] cache load failed: ${describeError(e)}`);
-      return { conversations: [], messages: [], users: [] };
+      return { conversations: [], messages: [], users: [], profiles: [] as StoredProfile[] };
     });
     const messages: Record<string, LocalMessage[]> = {};
     for (const raw of cached.messages) {
@@ -352,6 +366,7 @@ export class MessagingEngine {
       conversations: sortConversations(cached.conversations),
       messages,
       users: Object.fromEntries(cached.users.map((u) => [u.id, u])),
+      profiles: Object.fromEntries(cached.profiles.map((p) => [p.userId, p])),
     });
     void this.refreshUsers();
     this.connect();
@@ -381,10 +396,27 @@ export class MessagingEngine {
       conversations: [],
       messages: {},
       users: {},
+      profiles: {},
       typing: {},
       hasMore: {},
       progress: {},
     });
+  }
+
+  // ——— Profile photos ———
+
+  /** My new photo (or none): it goes out with my next messages. */
+  setMyProfile(profile: ProfileSecret): void {
+    this.learnProfile(this.deps.me, profile, this.deps.now());
+  }
+
+  /** Keep the newest profile each person sent (messages can arrive out of order). */
+  private learnProfile(userId: string, profile: ProfileSecret, at: number) {
+    const current = this.snapshot.profiles[userId];
+    if (current && current.at >= at) return;
+    const next: StoredProfile = { userId, profile, at };
+    void this.cache((st) => st.saveProfile(next));
+    this.emit({ profiles: { ...this.snapshot.profiles, [userId]: next } });
   }
 
   /**
@@ -422,6 +454,9 @@ export class MessagingEngine {
       return;
     }
     if (this.snapshot.connection === 'online') {
+      // iOS freezes a background app without closing its socket, so it may be
+      // dead: check now instead of waiting up to a heartbeat and a timeout.
+      this.probe();
       void this.sync();
     } else {
       this.attempt = 0;
@@ -500,11 +535,53 @@ export class MessagingEngine {
       } catch {
         // send failure surfaces as close
       }
+      this.clearTimer('pongTimer');
       this.pongTimer = this.deps.timers.setTimeout(() => {
         this.pongTimer = null;
-        if (this.socket === s) s.close(); // triggers reconnect via onclose
+        if (this.socket === s) {
+          this.dropSocket(s);
+          this.scheduleReconnect();
+        }
       }, PONG_TIMEOUT_MS);
     }, HEARTBEAT_MS);
+  }
+
+  /** Ping now; reconnect at once if nothing comes back quickly. */
+  private probe() {
+    const s = this.socket;
+    if (!s) return;
+    try {
+      s.send(PING);
+    } catch {
+      // send failure surfaces as close
+    }
+    this.clearTimer('pongTimer');
+    this.pongTimer = this.deps.timers.setTimeout(() => {
+      this.pongTimer = null;
+      if (this.socket !== s) return;
+      this.dropSocket(s);
+      this.attempt = 0;
+      this.clearTimer('reconnectTimer');
+      void this.connect();
+    }, PROBE_TIMEOUT_MS);
+  }
+
+  /**
+   * Forget a socket that stopped answering. A dead TCP connection may not
+   * report its close for a long time, so don't wait for onclose.
+   */
+  private dropSocket(s: SocketLike) {
+    if (this.socket !== s) return;
+    this.socket = null;
+    s.onclose = null;
+    try {
+      s.close();
+    } catch {
+      // already gone
+    }
+    this.clearTimer('heartbeatTimer');
+    this.clearTimer('pongTimer');
+    this.emit({ connection: 'offline' });
   }
 
   private onSocketMessage(data: string) {
@@ -542,6 +619,17 @@ export class MessagingEngine {
       case 'typing':
         if (event.userId !== this.deps.me) this.setTyping(event.conversationId, event.userId);
         break;
+      case 'presence': {
+        const user = this.snapshot.users[event.userId];
+        if (!user) break;
+        // lastSeenAt null: they hid their presence.
+        const next: PublicUser =
+          event.lastSeenAt === null && !event.online
+            ? { ...user, online: undefined, lastSeenAt: undefined }
+            : { ...user, online: event.online, lastSeenAt: event.lastSeenAt };
+        this.emit({ users: { ...this.snapshot.users, [event.userId]: next } });
+        break;
+      }
       case 'conversation':
         void this.syncConversation(event.conversationId);
         break;
@@ -554,6 +642,11 @@ export class MessagingEngine {
   }
 
   // ——— Sync ———
+
+  /** Re-read the directory (names and presence), e.g. after changing my visibility. */
+  refreshDirectory(): Promise<void> {
+    return this.refreshUsers();
+  }
 
   private async refreshUsers() {
     try {
@@ -761,6 +854,9 @@ export class MessagingEngine {
       const content = payload.success ? contentOf(payload.data, m) : null;
       // Wrong shape, or names another message / chat: the server moved it.
       if (!content) return { ...base, undecryptable: 'failed' };
+      const sent = payload.data!;
+      if (sent.t !== 'call' && sent.profile)
+        this.learnProfile(m.senderId, sent.profile, m.createdAt);
       return { ...base, ...content, opened: true, undecryptable: null };
     } catch (e) {
       if (__DEV__) console.warn(`[messaging] couldn't decrypt ${m.id}: ${describeError(e)}`);
@@ -1040,7 +1136,7 @@ export class MessagingEngine {
     m: LocalMessage,
     upload: LocalUpload | null,
   ): Promise<{ saved: Message; sent: LocalMessage }> {
-    const payload = payloadFor(m, upload);
+    const payload = payloadFor(m, upload, this.snapshot.profiles[this.deps.me]?.profile);
     const plain = JSON.stringify(payload);
     let fresh = false;
     for (let attempt = 1; ; attempt++) {

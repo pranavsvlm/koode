@@ -1,0 +1,5 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["KoodeCallUIModule"] },
+  "android": { "modules": ["expo.modules.koodecallui.KoodeCallUIModule"] }
+}

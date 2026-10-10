@@ -1,9 +1,12 @@
-import type {
-  AttachmentMeta,
-  Call,
-  ConversationSummary as ServerConversation,
-  Reaction as ServerReaction,
-  SystemEvent,
+import {
+  User,
+  type AttachmentMeta,
+  type Call,
+  type ConversationSummary as ServerConversation,
+  type LastSeenVisibility,
+  type ProfileSecret,
+  type Reaction as ServerReaction,
+  type SystemEvent,
 } from '@koode/shared';
 import { create } from 'zustand';
 import { buildFixtures, CANNED_REPLIES } from '@/dev/fixtures';
@@ -11,6 +14,7 @@ import { useDevSettings } from '@/dev/settings';
 import {
   ME,
   type Attachment,
+  type AvatarPhoto,
   type CallRecord,
   type Contact,
   type Conversation,
@@ -18,9 +22,11 @@ import {
   type MessageStatus,
   type Reaction,
 } from '@/domain/types';
+import { authClient } from '@/features/auth';
 import { callApi, callController, setCallIdentity } from '@/features/calls';
 import { resetDeviceCrypto } from '@/features/crypto';
 import { clearMediaFiles } from '@/features/media/files';
+import { clearPhotos } from '@/features/profile/photos';
 import type { UploadDraft } from '@/features/media/process';
 import {
   clearMessageCache,
@@ -62,6 +68,8 @@ type ChatState = {
   status: 'idle' | 'loading' | 'ready';
   connection: Snapshot['connection'];
   contacts: Record<string, Contact>;
+  /** My profile photo (live accounts). */
+  myPhoto?: AvatarPhoto;
   conversations: Record<string, Conversation>;
   /** Per conversation, oldest → newest. */
   messages: Record<string, Message[]>;
@@ -74,6 +82,8 @@ type ChatState = {
   unload: () => Promise<void>;
   /** App came to the foreground / network returned. */
   resume: () => void;
+  /** My new profile photo (or none); it goes out with my next messages. */
+  setMyProfile: (profile: ProfileSecret) => void;
   /** App has been in the background a while: disconnect until `resume`. */
   suspend: () => void;
   send: (conversationId: string, draft: Draft) => void;
@@ -231,8 +241,16 @@ export function liveAttachment(m: LocalMessage, progress?: number): Attachment |
 /** UI copies of engine messages, by engine message (engine objects change only when they do). */
 const uiMessages = new WeakMap<LocalMessage, { key: string; out: Message }>();
 const uiChats = new Map<string, { inputs: unknown[]; out: Message[] }>();
-let uiContacts: { users: Snapshot['users']; out: Record<string, Contact> } | null = null;
+let uiContacts: {
+  users: Snapshot['users'];
+  profiles: Snapshot['profiles'];
+  out: Record<string, Contact>;
+} | null = null;
 let uiConversations: Record<string, Conversation> = {};
+let uiMyPhoto: {
+  from: Snapshot['profiles'][string] | undefined;
+  out: AvatarPhoto | undefined;
+} | null = null;
 let uiMessageMap: Record<string, Message[]> = {};
 /** The whole record stays the same object when no chat changed. */
 function stableMessages(next: Record<string, Message[]>) {
@@ -247,17 +265,22 @@ function stableMessages(next: Record<string, Message[]>) {
 export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRead: boolean) {
   const mapId = (id: string) => (id === me ? ME : id);
   let contacts: Record<string, Contact> = {};
-  if (uiContacts?.users === snap.users) contacts = uiContacts.out;
+  if (uiContacts?.users === snap.users && uiContacts.profiles === snap.profiles)
+    contacts = uiContacts.out;
   else {
     for (const u of Object.values(snap.users)) {
+      const avatar = snap.profiles[u.id]?.profile.avatar;
       contacts[u.id] = {
         id: u.id,
         displayName: u.displayName,
         username: u.username,
         about: u.about || undefined,
+        online: u.online,
+        lastSeenAt: u.lastSeenAt ?? undefined,
+        photo: avatar ? { userId: u.id, id: avatar.id, content: avatar.content } : undefined,
       };
     }
-    uiContacts = { users: snap.users, out: contacts };
+    uiContacts = { users: snap.users, profiles: snap.profiles, out: contacts };
   }
   const conversations: Record<string, Conversation> = {};
   const byId = new Map(snap.conversations.map((c) => [c.id, c]));
@@ -339,8 +362,17 @@ export function deriveLive(snap: Snapshot, me: string, overlay: Overlay, showRea
       prev && prev.length === next.length && prev.every((x, i) => x === next[i]) ? prev : next;
     uiChats.set(convId, { inputs, out: messages[convId]! });
   }
+  const mine = snap.profiles[me];
+  if (uiMyPhoto?.from !== mine) {
+    const avatar = mine?.profile.avatar;
+    uiMyPhoto = {
+      from: mine,
+      out: avatar ? { userId: me, id: avatar.id, content: avatar.content } : undefined,
+    };
+  }
   return {
     contacts,
+    myPhoto: uiMyPhoto?.out,
     conversations: stableConversations,
     messages: stableMessages(messages),
     hasMore: snap.hasMore,
@@ -418,9 +450,19 @@ export const useChat = create<ChatState>((set, get) => {
         },
       );
       unsubscribe?.();
-      unsubscribe = engine.subscribe(refreshLive);
+      let wasOnline = false;
+      unsubscribe = engine.subscribe(() => {
+        refreshLive();
+        // Back online after a drop: catch up on calls too.
+        const online = engine?.getSnapshot().connection === 'online';
+        if (online && !wasOnline) void get().refreshCalls();
+        wasOnline = online;
+      });
       set({ mode: 'live', calls: [] });
       await engine.start();
+      // The server decides who sees presence; "Nobody" chosen on this device
+      // (possibly before the server knew the setting) must reach it.
+      if (usePreferences.getState().lastSeen === 'nobody') void pushLastSeen('nobody');
       void get().refreshCalls();
       if (slowLoading) await new Promise((r) => setTimeout(r, 1500));
       refreshLive();
@@ -430,6 +472,7 @@ export const useChat = create<ChatState>((set, get) => {
     unload: async () => {
       uiChats.clear();
       uiContacts = null;
+      uiMyPhoto = null;
       uiConversations = {};
       uiMessageMap = {};
       void callController.hangUp();
@@ -439,6 +482,7 @@ export const useChat = create<ChatState>((set, get) => {
       if (engine) await engine.reset();
       else await clearMessageCache().catch(() => {});
       clearMediaFiles();
+      clearPhotos();
       // Keys and sessions belong to this sign-in; a new one starts afresh.
       await resetDeviceCrypto().catch(() => {});
       engine = null;
@@ -454,7 +498,13 @@ export const useChat = create<ChatState>((set, get) => {
       });
     },
 
-    resume: () => engine?.resume(),
+    resume: () => {
+      engine?.resume();
+      void get().refreshCalls();
+    },
+    setMyProfile: (profile) => {
+      engine?.setMyProfile(profile);
+    },
     suspend: () => engine?.suspend(),
 
     send: (conversationId, draft) => {
@@ -600,7 +650,13 @@ export const useChat = create<ChatState>((set, get) => {
       if (get().mode !== 'live' || !engineMe) return;
       try {
         const me = engineMe;
-        set({ calls: (await callApi.list()).map((c) => toCallRecord(c, me)) });
+        const list = await callApi.list();
+        set({ calls: list.map((c) => toCallRecord(c, me)) });
+        // Calls that started or ended while the app was frozen or offline sent
+        // no event it could see: ring the one still ringing, close a stale one.
+        const current = callController.getSnapshot().call?.id;
+        for (const c of list)
+          if (c.state === 'ringing' || c.id === current) callController.onServerCall(c);
       } catch {
         // offline: keep what we have
       }
@@ -609,7 +665,19 @@ export const useChat = create<ChatState>((set, get) => {
 });
 
 // Re-derive ticks when the read-receipts preference changes (reciprocity).
+/** Save who sees my presence on the server, then re-read everyone's (it's mutual). */
+async function pushLastSeen(lastSeen: LastSeenVisibility) {
+  try {
+    await authClient.request('/v1/me', User, { method: 'PATCH', body: { lastSeen } });
+    await engine?.refreshDirectory();
+  } catch {
+    // offline: sent again next time the app starts (for "Nobody") or the setting changes
+  }
+}
+
 usePreferences.subscribe((p, prev) => {
+  if (p.lastSeen !== prev.lastSeen && engine && useChat.getState().mode === 'live')
+    void pushLastSeen(p.lastSeen);
   if (
     p.readReceipts !== prev.readReceipts &&
     engine &&
