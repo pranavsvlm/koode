@@ -30,7 +30,8 @@ Each needs the owner's explicit decision.
 | R2 bucket `koode-media` | Private (no public access)                                                  | Encrypted files only                                                                              |
 | Secrets                 | `AUTH_TOKEN_SECRET`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Push secrets **not set yet**                                                                      |
 | LiveKit                 | LiveKit Cloud (owner's project)                                             | Calls; frame-encrypted, so LiveKit relays only ciphertext. Not yet tested against this deployment |
-| Not deployed            | Push relay (APNs), Firebase (FCM)                                           | No push notifications                                                                             |
+| Firebase (FCM)          | Project `koode-50a08`, Android app `com.navoasis.koode.preview`             | `google-services.json` in `apps/mobile/` (git-ignored); `FCM_SERVICE_ACCOUNT` Worker secret set   |
+| Not deployed            | Push relay (APNs, needs the Apple Developer Program)                        | No iPhone push                                                                                    |
 
 Preview and production builds use this API (`eas.json`); development builds use
 `localhost`.
