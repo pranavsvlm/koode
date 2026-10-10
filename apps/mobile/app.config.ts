@@ -114,6 +114,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     favicon: './assets/favicon.png',
   },
   plugins: [
+    // Free signing can't include the push entitlement. First, so it runs last
+    // (after expo-notifications adds it).
+    ...(PERSONAL_TEAM ? ['./plugins/withoutPushEntitlement'] : []),
     'expo-router',
     'expo-status-bar',
     [
@@ -161,8 +164,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     './plugins/withSceneLifecycle',
     // End-to-end encryption: Signal's libsignal (pods/Maven; see the plugin).
     './plugins/withLibSignal',
-    // Free signing can't include the push entitlement.
-    ...(PERSONAL_TEAM ? ['./plugins/withoutPushEntitlement'] : []),
     // Dev builds reopen the last Metro server instead of showing the launcher, and
     // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.
     // after the Mac's LAN IP changes.
