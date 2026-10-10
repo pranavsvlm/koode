@@ -1,4 +1,9 @@
-import { AudioSession, RNE2EEManager, RNKeyProvider } from '@livekit/react-native';
+import {
+  AndroidAudioTypePresets,
+  AudioSession,
+  RNE2EEManager,
+  RNKeyProvider,
+} from '@livekit/react-native';
 import {
   ConnectionQuality,
   Room,
@@ -9,7 +14,8 @@ import {
   type RemoteVideoTrack,
   VideoPresets,
 } from 'livekit-client';
-import { Platform } from 'react-native';
+import Storage from 'expo-sqlite/kv-store';
+import { PermissionsAndroid, Platform } from 'react-native';
 
 export type MediaState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
 export type MediaQuality = 'good' | 'poor' | 'lost';
@@ -27,14 +33,30 @@ export type MediaEvents = {
 
 /** Media transport for a call. LiveKit in the app; a fake in tests. */
 export interface MediaSession {
-  /** `key`: the call's media key (base64, 32 bytes); frames are encrypted with it. */
-  connect(url: string, token: string, opts: { camera: boolean; key: string }): Promise<void>;
+  /**
+   * Get ready while the call rings or dials (before there's a token): DNS and
+   * TLS to the media server, and frame encryption, so answering connects faster.
+   */
+  prepare?(): Promise<void>;
+  /**
+   * `key`: the call's media key (base64, 32 bytes); frames are encrypted with it.
+   * `speaker`: the loudspeaker is the default output (video calls); Bluetooth or
+   * wired earphones are always preferred when connected.
+   */
+  connect(
+    url: string,
+    token: string,
+    opts: { camera: boolean; key: string; speaker: boolean },
+  ): Promise<void>;
   disconnect(): Promise<void>;
   setMicrophone(enabled: boolean): Promise<void>;
   /** Resolves false if the camera is unavailable (e.g. the iOS Simulator). */
   setCamera(enabled: boolean): Promise<boolean>;
   flipCamera(front: boolean): Promise<void>;
+  /** On: the loudspeaker. Off: earphones (Bluetooth or wired) if connected, else the earpiece. */
   setSpeaker(on: boolean): Promise<void>;
+  /** Whether Bluetooth or wired earphones are connected (Android; iOS routes to them itself). */
+  hasEarphones?(): Promise<boolean>;
   on<E extends keyof MediaEvents>(event: E, listener: MediaEvents[E]): () => void;
   localVideo(): LocalVideoTrack | undefined;
   remoteVideo(): RemoteVideoTrack | undefined;
@@ -49,6 +71,37 @@ const toQuality = (q: ConnectionQuality): MediaQuality =>
   q === ConnectionQuality.Poor ? 'poor' : q === ConnectionQuality.Lost ? 'lost' : 'good';
 
 const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+
+/** The media server's address, remembered from the last call (it isn't secret). */
+const MEDIA_URL_KEY = 'koode.media-url';
+let mediaUrl: string | null | undefined;
+const knownMediaUrl = async () =>
+  mediaUrl !== undefined
+    ? mediaUrl
+    : (mediaUrl = await Storage.getItem(MEDIA_URL_KEY).catch(() => null));
+const rememberMediaUrl = (url: string) => {
+  if (url === mediaUrl) return;
+  mediaUrl = url;
+  void Storage.setItem(MEDIA_URL_KEY, url).catch(() => {});
+};
+
+/** Earphones first, so a call never ignores them; then the call's default. */
+const outputOrder = (speaker: boolean) =>
+  speaker
+    ? (['bluetooth', 'headset', 'speaker', 'earpiece'] as const)
+    : (['bluetooth', 'headset', 'earpiece', 'speaker'] as const);
+
+/** Android 12+ needs "Nearby devices" to use Bluetooth earphones for calls. */
+async function allowBluetooth() {
+  if (Platform.OS !== 'android' || Number(Platform.Version) < 31) return;
+  const permission = PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT;
+  if (await PermissionsAndroid.check(permission).catch(() => true)) return;
+  await PermissionsAndroid.request(permission, {
+    title: 'Use your Bluetooth earphones?',
+    message: 'Koode needs Nearby devices to play calls through Bluetooth earphones.',
+    buttonPositive: 'Continue',
+  }).catch(() => undefined);
+}
 
 /**
  * LiveKit implementation (WebRTC via @livekit/react-native-webrtc), with
@@ -118,12 +171,33 @@ export function liveKitSession(): MediaSession {
       emit('encryption', false);
     });
 
-  return {
-    async connect(url, token, { camera, key }) {
-      emit('state', 'connecting');
+  let prepared: Promise<void> | null = null;
+  const prepare = () =>
+    (prepared ??= (async () => {
       // Encryption is on before anything is published; there's no unencrypted fallback.
-      await keyProvider.setSharedKey(bytes(key));
-      await room.setE2EEEnabled(true);
+      const url = await knownMediaUrl();
+      await Promise.all([
+        room.setE2EEEnabled(true),
+        url ? room.prepareConnection(url).catch(() => {}) : Promise.resolve(),
+      ]);
+    })());
+
+  return {
+    prepare,
+    async connect(url, token, { camera, key, speaker }) {
+      emit('state', 'connecting');
+      rememberMediaUrl(url);
+      await Promise.all([keyProvider.setSharedKey(bytes(key)), prepare()]);
+      // Let the system route audio (and follow earphones connecting mid-call):
+      // nothing is forced until the Speaker button is used.
+      await allowBluetooth();
+      await AudioSession.configureAudio({
+        android: {
+          preferredOutputList: [...outputOrder(speaker)],
+          audioTypeOptions: AndroidAudioTypePresets.communication,
+        },
+        ios: { defaultOutput: speaker ? 'speaker' : 'earpiece' },
+      }).catch(() => {});
       await AudioSession.startAudioSession();
       await room.connect(url, token);
       if (room.remoteParticipants.size > 0) emit('remote', true);
@@ -157,9 +231,23 @@ export function liveKitSession(): MediaSession {
       emit('video');
     },
     async setSpeaker(on) {
+      if (Platform.OS === 'ios') {
+        // "default" follows iOS routing: earphones if connected, else the default output.
+        await AudioSession.configureAudio({
+          ios: { defaultOutput: on ? 'speaker' : 'earpiece' },
+        }).catch(() => {});
+        await AudioSession.selectAudioOutput(on ? 'force_speaker' : 'default').catch(() => {});
+        return;
+      }
+      const available = await AudioSession.getAudioOutputs().catch(() => [] as string[]);
       const id =
-        Platform.OS === 'ios' ? (on ? 'force_speaker' : 'default') : on ? 'speaker' : 'earpiece';
-      await AudioSession.selectAudioOutput(id).catch(() => {});
+        outputOrder(on).find((o) => available.includes(o)) ?? (on ? 'speaker' : 'earpiece');
+      await AudioSession.selectAudioOutput(on ? 'speaker' : id).catch(() => {});
+    },
+    async hasEarphones() {
+      if (Platform.OS !== 'android') return false;
+      const available = await AudioSession.getAudioOutputs().catch(() => [] as string[]);
+      return available.includes('bluetooth') || available.includes('headset');
     },
     on(event, listener) {
       listeners[event].add(listener);

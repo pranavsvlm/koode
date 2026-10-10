@@ -1,7 +1,9 @@
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { useEffect } from 'react';
+import { Platform } from 'react-native';
 import { KoodeCallUI } from '../../../modules/koode-call-ui';
 import type { CallSnapshot } from './controller';
+import { releaseCallKeepAlive } from './keepAlive';
 import { useCall } from './index';
 
 const KEEP_AWAKE_TAG = 'koode-call';
@@ -30,13 +32,16 @@ export function callScreenEffects(s: CallSnapshot) {
     proximity: live(s) && !video && !s.speakerOn,
     // Android: a video call floats when you leave the app.
     pictureInPicture: (s.phase === 'connected' || s.phase === 'reconnecting') && video,
+    // Android: an ongoing-call service, so the call survives leaving the app.
+    background: live(s),
   };
 }
 
 /** Screen behaviour during calls. Mounted once at the root. */
 export function CallEffects() {
   const s = useCall();
-  const { keepAwake, proximity, pictureInPicture } = callScreenEffects(s);
+  const { keepAwake, proximity, pictureInPicture, background } = callScreenEffects(s);
+  const video = s.kind === 'video' || s.cameraOn;
 
   useEffect(() => {
     if (!keepAwake) return;
@@ -55,6 +60,16 @@ export function CallEffects() {
     void KoodeCallUI?.setPictureInPicture(true, 9, 16).catch(() => {});
     return () => void KoodeCallUI?.setPictureInPicture(false, 9, 16).catch(() => {});
   }, [pictureInPicture]);
+
+  useEffect(() => {
+    if (!background || Platform.OS !== 'android') return;
+    void KoodeCallUI?.startCall(video, 'Koode').catch(() => {});
+    return () => {
+      void KoodeCallUI?.endCall().catch(() => {});
+      releaseCallKeepAlive();
+    };
+    // Restarted when video starts, so the service may use the camera too.
+  }, [background, video]);
 
   return null;
 }

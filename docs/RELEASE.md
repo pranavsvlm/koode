@@ -177,8 +177,11 @@ permissions Play reviews. Each needs a declaration or removal, tested on a devic
   Permissions policy allows broad access only for a core need, so try blocking
   these (`android.blockedPermissions`) and confirm saving still works. Otherwise,
   declare them in the Play Console.
-- **`FOREGROUND_SERVICE_MEDIA_PLAYBACK`**, from the WebRTC and audio stack:
-  declare the foreground-service use (calls) in the Play Console.
+- **`FOREGROUND_SERVICE_MEDIA_PLAYBACK`**, from the WebRTC and audio stack, and
+  **`FOREGROUND_SERVICE_MICROPHONE` / `FOREGROUND_SERVICE_CAMERA`**, from Koode's
+  ongoing-call service: declare the foreground-service use (calls) in the Play
+  Console.
+- **`BLUETOOTH_CONNECT`** (Nearby devices): calls through Bluetooth earphones.
 - **`com.google.android.finsky.permission.BIND_GET_INSTALL_REFERRER_SERVICE`**, from
   `expo-application`. Koode never reads the install referrer; block it or mention it
   in Data safety.

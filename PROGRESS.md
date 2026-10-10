@@ -145,6 +145,16 @@ Also:
 
 ---
 
+### Phase 11 follow-up: second round of device feedback
+
+| Reported                                                  | Cause                                                                                                                                                           | Fix                                                                                                                                                                                                                                  |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cousin on Bluetooth earphones heard nothing               | Android forced the earpiece whenever Speaker was off, and Koode never asked for Nearby devices (`BLUETOOTH_CONNECT`), so Android 12+ couldn't use the earphones | The system routes calls (earphones first) and follows earphones connecting mid-call; Speaker off returns to earphones; the permission is asked for at the first call (controller tests)                                              |
+| PiP: "show me"                                            | Android: worked. iOS: the Simulator doesn't support PiP (`isPictureInPictureSupported NO`)                                                                      | Shown on the Android emulator; a PiP button on the video; iOS PiP left to a real iPhone                                                                                                                                              |
+| (found while testing PiP) Android calls in the background | React Native pauses JS timers when the activity pauses, so LiveKit's keep-alives stopped within seconds of leaving the app or floating                          | Ongoing-call foreground service (microphone, camera) plus a headless keep-alive task for the length of the call. Verified on the emulator: timers ran through 30 s of PiP                                                            |
+| Connecting takes long                                     | Answering did DNS, TLS and encryption setup only after the accept request                                                                                       | The media session is prepared while dialling or ringing (DNS/TLS pre-warm to the remembered media server, frame encryption); calls 7/7 and E2EE 17/17 still pass. **The speed-up itself isn't measured** (it needs the real network) |
+| Single tick although the other phone has internet         | Their Koode wasn't open: without push a phone receives only while the app is open (the server shows their last connection before the message)                   | Needs push: Firebase for Android (free; waiting on the owner's Firebase project), the Apple Developer Program for iPhone                                                                                                             |
+
 ## Phase 10: Builds and distribution (2026-10-10)
 
 Koode now builds locally for both platforms:

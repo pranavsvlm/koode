@@ -420,6 +420,30 @@ One-to-one voice and video calls. Group calls are not in scope yet.
     Its track lookup uses a small helper in react-native-webrtc's package
     (`com.oney.WebRTCModule.KoodeVideoTracks`), because the lookup is
     package-private there.
+- **Android background calls (Phase 11):** React Native pauses JS timers whenever
+  the activity pauses (another app, or picture-in-picture) unless a headless JS task
+  runs, and LiveKit's keep-alives are timers.
+  - While a call is live, `koode-call-ui` runs a foreground service (`KoodeCallService`,
+    types microphone and camera, with an ongoing "call in progress" notification),
+    so Android keeps the microphone and camera.
+  - It also runs a headless task (`KoodeCallKeepAlive`, `features/calls/keepAlive.ts`)
+    that lasts until the call ends.
+  - Verified on the emulator: timers kept running through 30 s in picture-in-picture
+    (they stopped after a few seconds without it).
+- **Audio routing (Phase 11):**
+  - Calls no longer force an output when they start. The system routes them, with
+    Bluetooth and wired earphones first (Android `preferredOutputList`, iOS
+    `defaultOutput`), and follows earphones that connect mid-call.
+  - Speaker on forces the loudspeaker. Off returns to the earphones, or else the
+    earpiece. Before, Android forced the earpiece, so Bluetooth earphones got no sound.
+  - Android 12+ asks for Nearby devices (`BLUETOOTH_CONNECT`) at the first call.
+- **Faster connecting (Phase 11):** the media session is created when dialling or
+  ringing starts. `prepare()` sets up frame encryption and pre-warms DNS and TLS to
+  the media server (address remembered from the last call), so answering only has to
+  join.
+- **Picture-in-picture button:** shown on the video while the controls are visible;
+  starts PiP on iOS (`startIOSPIP`) or Android. The iOS Simulator doesn't support PiP
+  (`isPictureInPictureSupported NO`), so iOS PiP is unverified there.
 - **Calls that rang while the app was frozen (Phase 11):** on returning to the
   foreground and after any reconnect, the app re-reads `/v1/calls`, rings a call
   that's still ringing, and closes a ringing screen whose call ended meanwhile.

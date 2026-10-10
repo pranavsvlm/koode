@@ -7,7 +7,15 @@ type KoodeCallUIModule = {
   setProximity(enabled: boolean): Promise<void>;
   /** Android: float the video call when leaving the app (aspect width:height). */
   setPictureInPicture(enabled: boolean, width: number, height: number): Promise<void>;
+  /** Android: float the video call now (the PiP button). */
+  enterPictureInPicture(): Promise<void>;
+  /** Android: keep a call running in the background (ongoing-call service and JS timers). */
+  startCall(video: boolean, title: string): Promise<void>;
+  endCall(): Promise<void>;
 };
+
+/** The headless task that keeps JS timers running during an Android call (see startCall). */
+export const KEEP_ALIVE_TASK = 'KoodeCallKeepAlive';
 
 /** Null in tests and in builds without the module. */
 export const KoodeCallUI = requireOptionalNativeModule<KoodeCallUIModule>('KoodeCallUI');

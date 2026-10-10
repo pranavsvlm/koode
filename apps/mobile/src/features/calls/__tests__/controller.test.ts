@@ -36,6 +36,8 @@ class FakeMedia implements MediaSession {
   speaker = false;
   cameraAvailable = true;
   failConnect = false;
+  /** Bluetooth or wired earphones connected. */
+  earphones = false;
   private l: { [E in keyof MediaEvents]: Set<MediaEvents[E]> } = {
     state: new Set(),
     remote: new Set(),
@@ -44,11 +46,20 @@ class FakeMedia implements MediaSession {
     encryption: new Set(),
   };
   key = '';
-  async connect(url: string, _token: string, opts: { camera: boolean; key: string }) {
+  async connect(
+    url: string,
+    _token: string,
+    opts: { camera: boolean; key: string; speaker: boolean },
+  ) {
     if (this.failConnect) throw new Error('no route');
     this.url = url;
     this.key = opts.key;
+    // The default output; earphones take over when connected.
+    this.speaker = opts.speaker && !this.earphones;
     this.connected = true;
+  }
+  async hasEarphones() {
+    return this.earphones;
   }
   async disconnect() {
     this.connected = false;
@@ -101,7 +112,7 @@ const join = (c: Call): SecureJoin => ({
 });
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
-function setup() {
+function setup(opts: { earphones?: boolean } = {}) {
   const clock = fakeClock();
   const medias: FakeMedia[] = [];
   const api = {
@@ -117,6 +128,7 @@ function setup() {
     api,
     createMedia: () => {
       const m = new FakeMedia();
+      m.earphones = opts.earphones ?? false;
       medias.push(m);
       return m;
     },
@@ -150,6 +162,24 @@ describe('CallController — outgoing', () => {
     await t.ctrl.start(PEER, 'video');
     expect(t.snap()).toMatchObject({ cameraOn: true, speakerOn: true });
     expect(t.media()).toMatchObject({ camera: true, speaker: true });
+  });
+
+  it('plays video calls in earphones when they’re connected, not the loudspeaker', async () => {
+    const t = setup({ earphones: true });
+    await t.ctrl.start(PEER, 'video');
+    expect(t.snap()).toMatchObject({ cameraOn: true, speakerOn: false });
+    expect(t.media().speaker).toBe(false);
+    // Speaker still works on request.
+    await t.ctrl.toggleSpeaker();
+    expect(t.media().speaker).toBe(true);
+  });
+
+  it('keeps earphones when a voice call turns into video', async () => {
+    const t = setup({ earphones: true });
+    await t.ctrl.start(PEER, 'voice');
+    await t.ctrl.toggleCamera();
+    expect(t.snap()).toMatchObject({ kind: 'video', cameraOn: true, speakerOn: false });
+    expect(t.media().speaker).toBe(false);
   });
 
   it('reports busy and failures without leaving a call open', async () => {

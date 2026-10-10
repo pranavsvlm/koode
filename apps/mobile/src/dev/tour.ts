@@ -4,6 +4,7 @@ import { File, Paths } from 'expo-file-system';
 import * as Notifications from 'expo-notifications';
 import { setLogLevel } from 'livekit-client';
 import { KoodeCalls } from '../../modules/koode-calls';
+import { KoodeCallUI } from '../../modules/koode-call-ui';
 import { useEffect } from 'react';
 import { useDevSettings } from '@/dev/settings';
 import { callController } from '@/features/calls';
@@ -151,6 +152,35 @@ export const TOUR: Step[] = [
       );
     },
   },
+  ...(process.env.EXPO_PUBLIC_DEV_PIP === '1'
+    ? [
+        {
+          // Picture-in-picture demo: the PiP button, pressed (Android emulator).
+          name: 'video-call-pip',
+          shotAtMs: 3000,
+          // As in a live call: the ongoing-call service and keep-alive start first.
+          run: () =>
+            void setTimeout(() => {
+              void KoodeCallUI?.startCall(true, 'Koode')
+                .then(() => devHandles.call?.float())
+                .catch((e: unknown) => console.log(`[tour] startCall failed ${String(e)}`));
+              // A heartbeat while floating: stops if JS timers are paused.
+              let n = 0;
+              const beat = setInterval(() => {
+                console.log(`[tour-pip] beat ${++n}`);
+                if (n >= 30) clearInterval(beat);
+              }, 1000);
+            }, 500),
+        },
+        // Logged only if JS timers keep running while the call floats.
+        { name: 'video-call-pip-2', run: () => {} },
+        // The call floats for 30 s (the heartbeat above should keep going), then ends.
+        {
+          name: 'video-call-pip-3',
+          run: () => void setTimeout(() => void KoodeCallUI?.endCall(), 30_000),
+        },
+      ]
+    : []),
   {
     name: 'incoming-call',
     run: () => {
@@ -337,6 +367,12 @@ export const CALL_TOUR: Step[] = [
     name: 'connected',
     run: () => {
       callLog('connected');
+      // Picture-in-picture demo (EXPO_PUBLIC_DEV_PIP=1): the PiP button, pressed.
+      if (process.env.EXPO_PUBLIC_DEV_PIP === '1')
+        setTimeout(() => {
+          devHandles.call?.float();
+          console.log('[tour-call] floated');
+        }, 1500);
       void callController
         .audioStats()
         .then((audio) =>

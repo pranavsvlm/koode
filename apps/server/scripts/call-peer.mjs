@@ -29,7 +29,7 @@ await waitFor(
   async () => (await call(`/calls/${outgoing.call.id}`, undefined, maya.token)).state === 'active',
   'the app to answer',
 );
-const media = await maya.joinMedia(outgoing, { listenTo: app.id });
+const media = await maya.joinMedia(outgoing, { listenTo: app.id, video: true });
 
 const connected = await tourJson('call', 'connected');
 check('app answered and connected', connected.phase === 'connected' && connected.remote, connected);

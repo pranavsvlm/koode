@@ -1,14 +1,17 @@
 import { VideoTrack } from '@livekit/react-native';
+import { startIOSPIP } from '@livekit/react-native-webrtc';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState, type ComponentProps } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import { Platform, Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
 import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { Icon, Text } from '@/components/ui';
+import { Icon, IconButton, Text } from '@/components/ui';
 import { MotionView } from '@/components/ui/MotionView';
+import { devHandles } from '@/dev/handles';
 import { devImages } from '@/dev/images';
+import { KoodeCallUI } from '../../../modules/koode-call-ui';
 import type { CallKind } from '@/domain/types';
 import { CallBackdrop } from '@/features/call/CallBackdrop';
 import { CallControls, type CallControl } from '@/features/call/CallControls';
@@ -45,6 +48,19 @@ export default function CallScreen() {
   // Android picture-in-picture: the whole screen shrinks into a small window.
   const { width } = useWindowDimensions();
   const floating = Platform.OS === 'android' && width < PIP_MAX_WIDTH;
+  const videoRef = useRef<View>(null);
+  /** Float the call now (also happens by itself when leaving the app). */
+  const floatCall = () => {
+    if (Platform.OS === 'ios') startIOSPIP(videoRef);
+    else void KoodeCallUI?.enterPictureInPicture().catch(() => {});
+  };
+  useEffect(() => {
+    if (!__DEV__) return;
+    devHandles.call = { float: floatCall };
+    return () => {
+      devHandles.call = undefined;
+    };
+  });
   // VideoTrack reads only the publication's track and id.
   const remoteRef = useMemo(
     () =>
@@ -142,6 +158,7 @@ export default function CallScreen() {
           <Animated.View entering={FadeIn.duration(500)} style={StyleSheet.absoluteFill}>
             {m.live && m.remoteVideo ? (
               <VideoTrack
+                ref={videoRef}
                 trackRef={remoteRef}
                 style={FILL}
                 objectFit="cover"
@@ -228,6 +245,18 @@ export default function CallScreen() {
             </MotionView>
           )}
           {showRemote && <View className="flex-1" pointerEvents="none" />}
+          {showRemote && chromeVisible && m.live && (
+            <View className="absolute left-4 top-14" pointerEvents="box-none">
+              <IconButton
+                icon="pip"
+                accessibilityLabel="Picture in picture"
+                onPress={floatCall}
+                size={40}
+                color={callColors.text}
+                className="bg-black/35"
+              />
+            </View>
+          )}
 
           {(!showRemote || chromeVisible) && (
             <MotionView

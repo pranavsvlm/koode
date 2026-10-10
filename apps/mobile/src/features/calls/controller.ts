@@ -141,6 +141,7 @@ export class CallController {
       cameraOn: kind === 'video',
       speakerOn: kind === 'video',
     });
+    this.prepareMedia();
     let join: SecureJoin;
     try {
       join = await this.deps.api.start(peerId, kind);
@@ -156,6 +157,13 @@ export class CallController {
     this.set({ call: join.call });
     this.ringTimer = this.deps.timers.setTimeout(() => void this.hangUp(), RING_TIMEOUT_MS);
     await this.joinMedia(join);
+  }
+
+  /** Warm up the media connection while dialling or ringing (reused by joinMedia). */
+  private prepareMedia() {
+    if (this.media) return;
+    this.media = this.deps.createMedia();
+    void this.media.prepare?.().catch(() => {});
   }
 
   // ——— Incoming ———
@@ -183,6 +191,7 @@ export class CallController {
         cameraOn: call.kind === 'video',
         speakerOn: call.kind === 'video',
       });
+      this.prepareMedia();
       return;
     }
     if (!current || current.id !== call.id) return;
@@ -218,7 +227,8 @@ export class CallController {
   // ——— During the call ———
 
   private async joinMedia(join: SecureJoin) {
-    const media = this.deps.createMedia();
+    // Usually created (and warmed up) while it rang.
+    const media = this.media ?? this.deps.createMedia();
     this.media = media;
     this.unsubs.push(
       media.on('remote', (present) => {
@@ -248,9 +258,12 @@ export class CallController {
       await media.connect(join.media.url, join.media.token, {
         camera: false,
         key: join.mediaKey,
+        speaker: this.snap.speakerOn,
       });
       if (this.snap.cameraOn) await this.setCamera(true);
-      if (this.snap.speakerOn) await media.setSpeaker(true);
+      // Earphones connected: the call plays there, so Speaker isn't on.
+      if (this.snap.speakerOn && (await media.hasEarphones?.().catch(() => false)))
+        this.set({ speakerOn: false });
     } catch {
       void this.hangUp('failed');
     }
@@ -274,10 +287,14 @@ export class CallController {
 
   async toggleCamera() {
     const on = !this.snap.cameraOn;
-    if (on && this.snap.kind === 'voice') this.set({ kind: 'video', speakerOn: true });
+    // A voice call turning into video moves to the loudspeaker, unless earphones are in.
+    const toSpeaker =
+      on && !this.snap.speakerOn && !(await this.media?.hasEarphones?.().catch(() => false));
+    if (on && this.snap.kind === 'voice') this.set({ kind: 'video' });
+    if (toSpeaker) this.set({ speakerOn: true });
     this.set({ cameraOn: on });
     await this.setCamera(on);
-    if (on) await this.media?.setSpeaker(true);
+    if (toSpeaker) await this.media?.setSpeaker(true);
   }
 
   async flipCamera() {

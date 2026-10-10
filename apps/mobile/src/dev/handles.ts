@@ -8,4 +8,5 @@ export const devHandles: {
     sendRecording: () => Promise<void>;
     focus: () => void;
   };
+  call?: { float: () => void };
 } = {};

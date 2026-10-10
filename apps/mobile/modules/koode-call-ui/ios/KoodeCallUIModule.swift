@@ -14,5 +14,9 @@ public class KoodeCallUIModule: Module {
 
     /// Android only; picture-in-picture on iOS is per video view.
     AsyncFunction("setPictureInPicture") { (_: Bool, _: Int, _: Int) in }
+    AsyncFunction("enterPictureInPicture") {}
+    /// Android only: iOS keeps calls running through the audio background mode.
+    AsyncFunction("startCall") { (_: Bool, _: String) in }
+    AsyncFunction("endCall") {}
   }
 }

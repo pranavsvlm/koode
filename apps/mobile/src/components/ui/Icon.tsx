@@ -70,6 +70,7 @@ export const ICONS = {
   play: { ios: 'play.fill', android: 'play_arrow' },
   pause: { ios: 'pause.fill', android: 'pause' },
   signal: { ios: 'wifi', android: 'wifi' },
+  pip: { ios: 'pip.enter', android: 'picture_in_picture_alt' },
   'signal-weak': { ios: 'wifi.exclamationmark', android: 'wifi_off' },
   edit: { ios: 'pencil', android: 'edit' },
   location: { ios: 'location.fill', android: 'location_on' },

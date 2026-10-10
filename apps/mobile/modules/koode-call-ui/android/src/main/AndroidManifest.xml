@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Calls keep running (and the microphone stays on) when Koode isn't on screen. -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+  <application>
+    <service
+      android:name="expo.modules.koodecallui.KoodeCallService"
+      android:exported="false"
+      android:foregroundServiceType="microphone|camera" />
+  </application>
+</manifest>

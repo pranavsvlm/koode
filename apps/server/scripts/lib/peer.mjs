@@ -22,11 +22,15 @@ import {
   AudioSource,
   AudioStream,
   LocalAudioTrack,
+  LocalVideoTrack,
   Room,
   RoomEvent,
   TrackKind,
   TrackPublishOptions,
   TrackSource,
+  VideoBufferType,
+  VideoFrame,
+  VideoSource,
 } from '@livekit/rtc-node';
 import { AccessToken } from 'livekit-server-sdk';
 
@@ -574,15 +578,24 @@ export async function createPeer({ invite, name, displayName }) {
      * Join a call's media with frame encryption, publishing a 440 Hz tone and
      * measuring the decoded audio of `listenTo`.
      */
-    async joinMedia(join, { listenTo } = {}) {
-      return joinRoom(join.media.url, join.media.token, B(join.mediaKey), { listenTo, tone: true });
+    async joinMedia(join, { listenTo, video = false } = {}) {
+      return joinRoom(join.media.url, join.media.token, B(join.mediaKey), {
+        listenTo,
+        tone: true,
+        video,
+      });
     },
   };
   return peer;
 }
 
 /** A LiveKit room member: optional tone; decoded audio energy from one person. */
-export async function joinRoom(url, token, sharedKey, { listenTo, tone = false } = {}) {
+export async function joinRoom(
+  url,
+  token,
+  sharedKey,
+  { listenTo, tone = false, video = false } = {},
+) {
   const room = new Room();
   let frames = 0;
   let energy = 0;
@@ -615,11 +628,40 @@ export async function joinRoom(url, token, sharedKey, { listenTo, tone = false }
       void source.captureFrame(new AudioFrame(data, 48000, 1, 480)).catch(() => {});
     }, 10);
   }
+  let videoTimer = null;
+  if (video) {
+    // A moving test pattern (portrait, 15 fps), frame-encrypted like the audio.
+    const W = 360;
+    const H = 640;
+    const source = new VideoSource(W, H);
+    await room.localParticipant.publishTrack(
+      LocalVideoTrack.createVideoTrack('camera', source),
+      new TrackPublishOptions({ source: TrackSource.SOURCE_CAMERA }),
+    );
+    let n = 0;
+    const rgba = new Uint8Array(W * H * 4);
+    videoTimer = setInterval(() => {
+      n++;
+      const band = (n * 6) % H;
+      for (let y = 0; y < H; y++) {
+        const on = Math.abs(y - band) < 40;
+        for (let x = 0; x < W; x++) {
+          const i = (y * W + x) * 4;
+          rgba[i] = on ? 255 : (x * 255) / W;
+          rgba[i + 1] = on ? 255 : (y * 255) / H;
+          rgba[i + 2] = on ? 255 : 160;
+          rgba[i + 3] = 255;
+        }
+      }
+      source.captureFrame(new VideoFrame(rgba, W, H, VideoBufferType.RGBA));
+    }, 66);
+  }
   return {
     room,
     heard: () => ({ frames, energy }),
     async leave() {
       if (timer) clearInterval(timer);
+      if (videoTimer) clearInterval(videoTimer);
       await room.disconnect();
     },
   };

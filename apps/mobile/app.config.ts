@@ -107,6 +107,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     // Added by the WebRTC plugin; Koode never draws over other apps. Development
     // builds keep it for React Native's debug overlay.
     blockedPermissions: variant === 'development' ? [] : ['android.permission.SYSTEM_ALERT_WINDOW'],
+    // Android 12+: calls through Bluetooth earphones (asked for at the first call).
+    permissions: ['android.permission.BLUETOOTH_CONNECT'],
     googleServicesFile: GOOGLE_SERVICES,
   },
   web: {

@@ -38,6 +38,13 @@ describe('callScreenEffects', () => {
     expect(callScreenEffects(snap({ phase: 'incoming' })).proximity).toBe(false);
   });
 
+  it('keeps the call alive in the background from dialling until it ends (Android)', () => {
+    for (const phase of ['outgoing', 'connecting', 'connected', 'reconnecting'] as const)
+      expect(callScreenEffects(snap({ phase })).background).toBe(true);
+    for (const phase of ['idle', 'incoming', 'ended'] as const)
+      expect(callScreenEffects(snap({ phase })).background).toBe(false);
+  });
+
   it('floats only a connected video call', () => {
     expect(callScreenEffects(snap({ phase: 'connected', kind: 'video' })).pictureInPicture).toBe(
       true,

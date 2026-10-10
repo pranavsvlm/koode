@@ -2,9 +2,14 @@ package expo.modules.koodecallui
 
 import android.app.PictureInPictureParams
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.os.PowerManager
 import android.util.Rational
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.ReactContext
+import com.facebook.react.jstasks.HeadlessJsTaskConfig
+import com.facebook.react.jstasks.HeadlessJsTaskContext
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
@@ -17,6 +22,7 @@ class KoodeCallUIModule : Module() {
   private var pipEnabled = false
   private var pipAspect = Rational(9, 16)
   private var proximity: PowerManager.WakeLock? = null
+  private var keepAliveTask: Int? = null
 
   override fun definition() = ModuleDefinition {
     Name("KoodeCallUI")
@@ -26,6 +32,47 @@ class KoodeCallUIModule : Module() {
     /** Video call on screen: leaving the app shrinks it into a floating window. */
     AsyncFunction("setPictureInPicture") { enabled: Boolean, width: Int, height: Int ->
       setPictureInPicture(enabled, width, height)
+    }.runOnQueue(Queues.MAIN)
+
+    /**
+     * A call started: the ongoing-call service (microphone and camera keep
+     * working in the background) and a headless JS task. React Native pauses
+     * JS timers whenever the activity pauses (another app, or picture-in-
+     * picture) unless a headless task runs, and the call's keep-alives are timers.
+     */
+    AsyncFunction("startCall") { video: Boolean, title: String ->
+      val context = appContext.reactContext ?: return@AsyncFunction
+      val intent = Intent(context, KoodeCallService::class.java)
+        .putExtra(KoodeCallService.EXTRA_VIDEO, video)
+        .putExtra(KoodeCallService.EXTRA_TITLE, title)
+      try {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+        else context.startService(intent)
+      } catch (_: Exception) {
+        // not allowed right now (e.g. started from the background): the call goes on without it
+      }
+      val react = context as? ReactContext
+      if (react == null) {
+        android.util.Log.w("KoodeCallUI", "no ReactContext (${context.javaClass.name}); timers may pause")
+        return@AsyncFunction
+      }
+      if (keepAliveTask == null) {
+        keepAliveTask = HeadlessJsTaskContext.getInstance(react).startTask(
+          HeadlessJsTaskConfig(KEEP_ALIVE_TASK, Arguments.createMap(), 0, true),
+        )
+      }
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("endCall") { stopCall() }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("enterPictureInPicture") {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        try {
+          appContext.currentActivity?.enterPictureInPictureMode(pipParams())
+        } catch (_: IllegalStateException) {
+          // the activity doesn't support picture-in-picture
+        }
+      }
     }.runOnQueue(Queues.MAIN)
 
     // Android 8–11 has no auto-enter: enter when the user leaves (Home, Recents).
@@ -39,13 +86,25 @@ class KoodeCallUIModule : Module() {
       }
     }
 
-    OnDestroy { setProximity(false) }
+    OnDestroy {
+      setProximity(false)
+      stopCall()
+    }
 
     View(KoodeVideoView::class) {
       Prop("streamURL") { view: KoodeVideoView, url: String? -> view.setStreamURL(url) }
       Prop("mirror") { view: KoodeVideoView, mirror: Boolean -> view.setMirror(mirror) }
       Prop("cornerRadius") { view: KoodeVideoView, radius: Double -> view.setCornerRadius(radius.toFloat()) }
     }
+  }
+
+  private fun stopCall() {
+    val context = appContext.reactContext ?: return
+    context.stopService(Intent(context, KoodeCallService::class.java))
+    val task = keepAliveTask ?: return
+    keepAliveTask = null
+    val tasks = (context as? ReactContext)?.let { HeadlessJsTaskContext.getInstance(it) } ?: return
+    if (tasks.isTaskRunning(task)) tasks.finishTask(task)
   }
 
   private fun setProximity(enabled: Boolean) {
@@ -61,6 +120,11 @@ class KoodeCallUIModule : Module() {
       proximity?.let { if (it.isHeld) it.release(PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY) }
       proximity = null
     }
+  }
+
+  companion object {
+    /** Registered in JS (AppRegistry); resolves when the call ends. */
+    const val KEEP_ALIVE_TASK = "KoodeCallKeepAlive"
   }
 
   private fun pipParams(): PictureInPictureParams {
