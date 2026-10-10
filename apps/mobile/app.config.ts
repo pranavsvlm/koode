@@ -14,6 +14,11 @@ const BUNDLE_ID_BASE = 'com.navoasis.koode';
 // Printed by `npx eas-cli init` (not a secret). Required for EAS Build.
 const EAS_PROJECT_ID: string | undefined = undefined;
 
+// Free Apple ID signing (Xcode's "personal team"), to install on your own iPhone
+// without the paid Developer Program. Such builds have no push notifications
+// and expire after 7 days (docs/RELEASE.md).
+const PERSONAL_TEAM = process.env.KOODE_PERSONAL_TEAM;
+
 // Firebase config for Android push (FCM): path to google-services.json. Not
 // committed; an EAS "file" environment variable in cloud builds (docs/SETUP.md).
 const GOOGLE_SERVICES = process.env.GOOGLE_SERVICES_JSON;
@@ -41,6 +46,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   userInterfaceStyle: 'automatic',
   ios: {
     bundleIdentifier: VARIANTS[variant].id,
+    appleTeamId: PERSONAL_TEAM,
     // Light, dark and tinted home-screen icons (scripts/generate-icons.py).
     icon: {
       light: './assets/icon.png',
@@ -155,6 +161,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     './plugins/withSceneLifecycle',
     // End-to-end encryption: Signal's libsignal (pods/Maven; see the plugin).
     './plugins/withLibSignal',
+    // Free signing can't include the push entitlement.
+    ...(PERSONAL_TEAM ? ['./plugins/withoutPushEntitlement'] : []),
     // Dev builds reopen the last Metro server instead of showing the launcher, and
     // fall back to localhost (the Simulator's Metro) if that server is gone, e.g.
     // after the Mac's LAN IP changes.
