@@ -23,13 +23,14 @@ Each needs the owner's explicit decision.
 
 ## Deployed (2026-10-10)
 
-| Service                 | Where                                              | Notes                                                       |
-| ----------------------- | -------------------------------------------------- | ----------------------------------------------------------- |
-| API Worker              | `https://koode-server.pranavsvlm.workers.dev`      | `pnpm --filter @koode/server run deploy:remote`             |
-| D1 database `koode`     | APAC                                               | Migrations: `pnpm --filter @koode/server db:migrate:remote` |
-| R2 bucket `koode-media` | Private (no public access)                         | Encrypted files only                                        |
-| Secrets                 | `AUTH_TOKEN_SECRET` set                            | LiveKit and push secrets **not set yet**                    |
-| Not deployed            | LiveKit (calls), push relay (APNs), Firebase (FCM) | Calls fail with "Calling isn't configured"; no push         |
+| Service                 | Where                                                                       | Notes                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| API Worker              | `https://koode-server.pranavsvlm.workers.dev`                               | `pnpm --filter @koode/server run deploy:remote`                                                   |
+| D1 database `koode`     | APAC                                                                        | Migrations: `pnpm --filter @koode/server db:migrate:remote`                                       |
+| R2 bucket `koode-media` | Private (no public access)                                                  | Encrypted files only                                                                              |
+| Secrets                 | `AUTH_TOKEN_SECRET`, `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Push secrets **not set yet**                                                                      |
+| LiveKit                 | LiveKit Cloud (owner's project)                                             | Calls; frame-encrypted, so LiveKit relays only ciphertext. Not yet tested against this deployment |
+| Not deployed            | Push relay (APNs), Firebase (FCM)                                           | No push notifications                                                                             |
 
 Preview and production builds use this API (`eas.json`); development builds use
 `localhost`.
