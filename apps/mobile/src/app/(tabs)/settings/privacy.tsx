@@ -1,7 +1,8 @@
 import { router } from 'expo-router';
 import { ScrollView, View } from 'react-native';
-import { Icon, ListRow, ListSection, Text, useToast } from '@/components/ui';
+import { Icon, ListRow, ListSection, Text, useDialog, useToast } from '@/components/ui';
 import { usePreferences, type LastSeenVisibility } from '@/stores/preferences';
+import { useSession } from '@/stores/session';
 
 const LAST_SEEN: { value: LastSeenVisibility; label: string }[] = [
   { value: 'contacts', label: 'My Contacts' },
@@ -11,6 +12,8 @@ const LAST_SEEN: { value: LastSeenVisibility; label: string }[] = [
 export default function PrivacyScreen() {
   const p = usePreferences();
   const toast = useToast();
+  const dialog = useDialog();
+  const deleteAccount = useSession((s) => s.deleteAccount);
 
   return (
     <ScrollView className="bg-background" contentContainerClassName="gap-7 px-4 pb-16 pt-4">
@@ -95,6 +98,28 @@ export default function PrivacyScreen() {
           title="Blocked Contacts"
           accessory={{ type: 'chevron', value: 'None' }}
           onPress={() => toast.show({ title: 'You haven’t blocked anyone' })}
+        />
+      </ListSection>
+
+      <ListSection footer="Deletes your account, signs out all your devices, and deletes every message and file you sent, for everyone. This can’t be undone.">
+        <ListRow
+          title="Delete Account"
+          destructive
+          onPress={async () => {
+            const ok = await dialog.confirm({
+              title: 'Delete your account?',
+              message:
+                'Your profile, devices and keys are removed, and everything you sent is deleted for everyone. You can’t undo this.',
+              confirmLabel: 'Delete Account',
+              destructive: true,
+            });
+            if (!ok) return;
+            try {
+              await deleteAccount();
+            } catch {
+              toast.show({ title: 'Couldn’t delete your account. Try again.', tone: 'error' });
+            }
+          }}
         />
       </ListSection>
     </ScrollView>

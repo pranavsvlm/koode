@@ -41,11 +41,52 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   userInterfaceStyle: 'automatic',
   ios: {
     bundleIdentifier: VARIANTS[variant].id,
+    // Light, dark and tinted home-screen icons (scripts/generate-icons.py).
+    icon: {
+      light: './assets/icon.png',
+      dark: './assets/icon-dark.png',
+      tinted: './assets/icon-tinted.png',
+    },
     supportsTablet: false,
     infoPlist: {
       // audio: keep call audio running in the background.
       // voip: PushKit incoming-call pushes (reported to CallKit).
       UIBackgroundModes: ['audio', 'voip'],
+    },
+    // App Store privacy manifest. No tracking. Collected: the profile name and an
+    // account id, for app functionality. Messages, files and calls are end-to-end
+    // encrypted, so the operator can't read them (not "collected").
+    privacyManifests: {
+      NSPrivacyTracking: false,
+      NSPrivacyTrackingDomains: [],
+      NSPrivacyCollectedDataTypes: [
+        {
+          NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeName',
+          NSPrivacyCollectedDataTypeLinked: true,
+          NSPrivacyCollectedDataTypeTracking: false,
+          NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+        },
+        {
+          NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeUserID',
+          NSPrivacyCollectedDataTypeLinked: true,
+          NSPrivacyCollectedDataTypeTracking: false,
+          NSPrivacyCollectedDataTypePurposes: ['NSPrivacyCollectedDataTypePurposeAppFunctionality'],
+        },
+      ],
+      NSPrivacyAccessedAPITypes: [
+        {
+          NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryFileTimestamp',
+          NSPrivacyAccessedAPITypeReasons: ['C617.1'],
+        },
+        {
+          NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryUserDefaults',
+          NSPrivacyAccessedAPITypeReasons: ['CA92.1'],
+        },
+        {
+          NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategorySystemBootTime',
+          NSPrivacyAccessedAPITypeReasons: ['35F9.1'],
+        },
+      ],
     },
   },
   android: {
@@ -57,6 +98,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       monochromeImage: './assets/android-icon-monochrome.png',
     },
     predictiveBackGestureEnabled: false,
+    // Added by the WebRTC plugin; Koode never draws over other apps. Development
+    // builds keep it for React Native's debug overlay.
+    blockedPermissions: variant === 'development' ? [] : ['android.permission.SYSTEM_ALERT_WINDOW'],
     googleServicesFile: GOOGLE_SERVICES,
   },
   web: {
@@ -124,6 +168,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   extra: {
     variant,
+    // Where Koode's source is published (AGPL-3.0, offered to users in the app).
+    sourceCodeUrl: process.env.KOODE_SOURCE_URL,
     // Must match the aps-environment entitlement above.
     pushEnvironment: variant === 'development' ? 'sandbox' : 'production',
     eas: EAS_PROJECT_ID ? { projectId: EAS_PROJECT_ID } : undefined,

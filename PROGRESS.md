@@ -1,21 +1,155 @@
 # Progress
 
-| Phase | Scope                    | Status                                                                     |
-| ----- | ------------------------ | -------------------------------------------------------------------------- |
-| 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2)                     |
-| 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator                              |
-| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator                              |
-| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator                        |
-| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator                        |
-| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator                              |
-| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator                             |
-| 8     | Security and E2EE        | ✅ Complete on iOS; interop E2E on the Simulator; Android E2EE not written |
-| 9     | Performance and testing  | ✅ Complete; 53 device checks on the iOS 27 Simulator                      |
-| 10    | Builds and distribution  | ⏳ In progress                                                             |
+| Phase | Scope                    | Status                                                               |
+| ----- | ------------------------ | -------------------------------------------------------------------- |
+| 1     | Project foundation       | ✅ Complete (Simulator launch verified during Phase 2)               |
+| 2     | Premium UI/UX            | ✅ Complete; verified on the iOS 27 Simulator                        |
+| 3     | Authentication           | ✅ Complete; verified on the iOS 27 Simulator                        |
+| 4     | Real-time messaging      | ✅ Complete; two-party test on the iOS 27 Simulator                  |
+| 5     | Voice and video calling  | ✅ Complete; two-party test on the iOS 27 Simulator                  |
+| 6     | Notifications            | ✅ Complete; push E2E on the iOS 27 Simulator                        |
+| 7     | Media and group features | ✅ Complete; media E2E on the iOS 27 Simulator                       |
+| 8     | Security and E2EE        | ✅ Complete on iOS; interop E2E on the Simulator (Android: Phase 10) |
+| 9     | Performance and testing  | ✅ Complete; 53 device checks on the iOS 27 Simulator                |
+| 10    | Builds and distribution  | ✅ Complete; local builds verified; nothing uploaded or submitted    |
 
-**E2EE status:** messages, attachments, reactions and calls are end-to-end encrypted
-with libsignal on **iOS**, verified against Signal's Node implementation. Not
-independently reviewed. **Android has no E2EE module yet**, so it can't send.
+**E2EE status:**
+
+- **iOS:** messages, attachments, reactions and calls are end-to-end encrypted with
+  libsignal, verified against Signal's Node implementation.
+- **Android** (emulator): messages, attachments, reactions, safety numbers and the
+  call key are verified the same way. **Encrypted call media isn't**, because the
+  emulator's call didn't connect.
+- **Not independently reviewed:** don't use Koode for sensitive conversations yet.
+
+---
+
+## Phase 10: Builds and distribution (2026-10-10)
+
+Koode now builds locally for both platforms:
+
+- an iOS Simulator Release build;
+- Android debug and release APKs, on a local Android toolchain and emulator.
+
+**Distribution is ready but untouched:** EAS profiles, icons, the splash, permissions,
+the privacy manifest, metadata and the release guide are in place. Nothing was
+uploaded, submitted or deployed, and no paid account was used.
+
+### Delivered
+
+- **Android end-to-end encryption:**
+  - `modules/koode-signal/android`: Kotlin, `org.signal:libsignal-android` 0.103.0,
+    with the same API as the iOS module, including streaming file encryption.
+  - `SignalFileStore`: Signal's protocol stores, as AES-GCM files under an Android
+    Keystore key in the no-backup directory.
+  - `withLibSignal`: core-library desugaring (libsignal needs it), and x86_64
+    excluded from iOS Simulator builds (libsignal has no Intel-Simulator slice; it
+    broke Release links).
+- **Icons and splash:**
+  - `scripts/generate-icons.py` draws the mark: two bubbles with a keyhole.
+  - It generates the iOS light, dark and tinted icons, the Android adaptive layers
+    (foreground, background, monochrome), the splash icon and the favicon.
+- **Permissions and privacy:**
+  - **iOS privacy manifest:**
+    - no tracking;
+    - collected: name and user ID, for app functionality;
+    - required-reason APIs declared.
+  - **Android:** `SYSTEM_ALERT_WINDOW` is blocked outside development builds.
+    Two notification fixes for Android:
+    - the calls channel no longer sets an invalid sound;
+    - the `message` category is iOS-only.
+- **Account deletion** (required by both stores):
+  - `DELETE /v1/me`: signs out every device, erases keys, push registrations and
+    the profile, deletes everything the account sent for everyone, and is audited;
+  - Settings → Privacy & Security → Delete Account.
+- **Source Code & Licences screen:** the AGPL source offer, with the link set by
+  `KOODE_SOURCE_URL`.
+- **`docs/RELEASE.md`:**
+  - open decisions;
+  - build variants and versioning;
+  - the pre-release checklist;
+  - TestFlight steps;
+  - Android signing, size and Play policy declarations;
+  - store metadata, App Privacy / Data safety answers and a privacy-policy outline.
+- **`docs/SETUP.md`:** the Android toolchain, the emulator and the device-suite runs.
+- **Test harness fixes:** races that made device checks flaky.
+  - **E2EE tour:** stays in the call until the peer has checked it. Hanging up
+    early produced two false failures.
+  - **Calls tour:** records how the call ended.
+  - **Push peer:** polls for the declined CallKit call.
+
+### Verification
+
+| Check                                                                                                                                                                           | Result                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `pnpm check` (types, lint, Prettier, all tests)                                                                                                                                 | ✅ Pass                                     |
+| Shared / push relay / server / mobile tests (server adds account deletion)                                                                                                      | ✅ 33 / 6 / 104 / 197                       |
+| **iOS device suites on the final code** (iOS 27 Simulator, Debug):<br>messaging 3/3, calls 7/7, push 5/5, media 11/11, resilience 13/13 (now with account deletion), E2EE 17/17 | ✅ **56/56**                                |
+| New screens reviewed on the Simulator (dev tour): Settings, Source Code & Licences, Privacy & Security                                                                          | ✅                                          |
+| iOS **Release** build for the Simulator (arm64): installs and starts on onboarding                                                                                              | ✅                                          |
+| Native project contents: privacy manifest, light/dark/tinted icons, `SYSTEM_ALERT_WINDOW` removed                                                                               | ✅ Checked in the prebuilt projects         |
+| Android **debug APK** on the emulator (API 36, arm64) with Metro                                                                                                                | ✅ Builds and runs                          |
+| **Android E2EE interop** with Signal's Node implementation (emulator)                                                                                                           | ⚠️ 14/17                                    |
+| — texts, photo, reactions and safety numbers both ways (Kotlin ↔ Node), server sees only ciphertext                                                                             | ✅ 11/11                                    |
+| — call key decrypts on Android                                                                                                                                                  | ✅                                          |
+| — call media (the app decodes the audio, reports E2EE, its track is seen GCM-encrypted)                                                                                         | ❌ The call never connected on the emulator |
+| Android **release APK** (`preview` variant, `assembleRelease`): installs on the emulator and starts on onboarding                                                               | ✅                                          |
+| APK contents (`aapt2`): `com.navoasis.koode.preview` 0.1.0 (1), label "Koode Preview", four ABIs, 312 MB                                                                        | ✅                                          |
+
+### Not verified
+
+- **Android calls.** The emulator couldn't connect to the local LiveKit server
+  (the server advertises the Mac's LAN address; `--node-ip 127.0.0.1` didn't help
+  either). Encrypted Android calls are unverified, and the cause (emulator
+  networking or the app) isn't proven.
+- **Android device suites:** messaging, calls, push, media and resilience didn't
+  run on Android, only the E2EE suite. **Android push (FCM)** needs a Firebase
+  project.
+- **Physical devices:** none, on either platform. That includes CallKit, VoIP
+  push, battery and thermal behaviour.
+- **EAS and TestFlight:** cloud builds, credentials, upload and Beta Review need
+  Apple Developer, Expo and Play Console accounts, and approval. None were used.
+  The EAS profiles exist but haven't run.
+- **Release-signed Android builds:** the local release APK uses the debug key.
+- **The Delete Account button and its dialog**, tapped in the UI. Deletion was
+  verified through the same store action (resilience suite) and the server test.
+- **Wrong-key listener:** in the two E2EE runs where the app hung up early, the
+  wrong-key listener decoded a little audio energy (18,900 and 7.3 million, against
+  4.9 billion for the listener with the key). A standalone LiveKit test gave 0
+  through steady state, a publisher leaving and the room being deleted. With the
+  harness fixed, it has been 0 in every run. The cause wasn't found; it's worth
+  checking in the security review.
+- **The legal questions in `docs/RELEASE.md`:** AGPL and the App Store, export
+  compliance, Koode's licence.
+
+### Known issues and limitations
+
+- **AGPL and the App Store:** a legal blocker for TestFlight external testing and
+  the App Store (see `docs/RELEASE.md`). Internal TestFlight, direct APKs and Google
+  Play don't have this conflict.
+- **APK size:** 312 MB with all four ABIs. Use an arm64-only APK for testers, and
+  an App Bundle for Play.
+- **Play policy:** media-read, foreground-service and install-referrer permissions
+  come from Expo libraries and need declarations or removal before a Play upload.
+- **The local `apps/mobile/android` project** was last prebuilt for the `preview`
+  variant. Run `npx expo prebuild -p android --clean` before a development build.
+
+### Manual configuration required
+
+- **Accounts (with approval):** Apple Developer Program, Expo (`eas init`, then
+  `EAS_PROJECT_ID`), Google Play Console, Firebase (`google-services.json`).
+- **Hosting:** deploy the server, LiveKit and the push relay, then set
+  `EXPO_PUBLIC_API_URL` per variant.
+- **Before any external distribution:**
+  - settle the AGPL question with counsel;
+  - choose Koode's licence and publish the source, then set `KOODE_SOURCE_URL`;
+  - set `ITSAppUsesNonExemptEncryption` once export compliance is decided;
+  - publish a privacy policy and a support URL.
+- **Android release signing:** create an upload key outside the repository, or let
+  EAS manage it.
+- **Local Android builds:**
+  - JDK 17, Android SDK 36, NDK 27.1 and CMake 3.22 (`docs/SETUP.md`);
+  - rebuild both native apps (new module and plugin changes).
 
 ---
 

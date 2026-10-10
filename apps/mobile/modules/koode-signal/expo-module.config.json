@@ -1,6 +1,5 @@
 {
-  "platforms": ["apple"],
-  "apple": {
-    "modules": ["KoodeSignalModule"]
-  }
+  "platforms": ["apple", "android"],
+  "apple": { "modules": ["KoodeSignalModule"] },
+  "android": { "modules": ["expo.modules.koodesignal.KoodeSignalModule"] }
 }

@@ -1,0 +1,21 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'expo.modules.koodesignal'
+version = '0.1.0'
+
+android {
+  namespace "expo.modules.koodesignal"
+  defaultConfig {
+    versionCode 1
+    versionName "0.1.0"
+  }
+}
+
+dependencies {
+  // Signal's own library, from Signal's Maven repository (added by
+  // plugins/withLibSignal.js). Keep the version in step with the iOS pod.
+  implementation "org.signal:libsignal-android:0.103.0"
+}

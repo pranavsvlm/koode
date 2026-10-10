@@ -441,7 +441,8 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
 - **Not yet built:**
   - A full-screen incoming-call UI (`CallStyle` / full-screen intent or a
     self-managed `ConnectionService`).
-  - All Android push behaviour is untested (no device or emulator; see Known risks).
+  - Android push is untested: the emulator has no Firebase project
+    (`google-services.json`), so FCM delivery hasn't run.
 
 ## End-to-end encryption (Phase 8)
 
@@ -516,9 +517,13 @@ Worker ──► push/dispatch.ts ──┬─► push relay (HTTP/2) ──► 
 
 ### Implementation
 
-- **Native module** (`modules/koode-signal`, iOS only for now): libsignal's stores
-  live in the Keychain; protocol calls run on one serial queue; file encryption runs
-  apart. The plaintext of a message crosses the bridge as UTF-8 text.
+- **Native module** (`modules/koode-signal`): the same API on both platforms.
+  - **iOS** (Swift, the libsignal pod): stores in the Keychain.
+  - **Android** (Kotlin, `org.signal:libsignal-android`, with core-library
+    desugaring): one AES-GCM-encrypted file per item in the no-backup directory,
+    under an Android Keystore key.
+  - **Both:** protocol calls are serialized; file encryption streams in 1 MiB
+    chunks alongside; message plaintext crosses the bridge as UTF-8 text.
 - **Device crypto** (`src/features/crypto`):
   - **Keys:** a new server device starts from a fresh identity; nothing from an
     earlier sign-in carries over, because Keychain items can survive reinstalls. It
@@ -583,7 +588,9 @@ Interoperability was tested against Signal's Node implementation
 **Not verified:**
 
 - the app → peer audio direction, because the Simulator's microphone is silent;
-- Android, where the module isn't written;
+- Android calls: messages, files, reactions, safety numbers and the call key
+  pass on the emulator (Phase 10), but call media didn't connect there (the
+  emulator couldn't reach the local LiveKit server);
 - two physical devices;
 - any independent security review.
 
@@ -643,9 +650,9 @@ Planned:
 
 1. **Seven-day target:** 10 phases including real E2EE in seven days is very
    aggressive. E2EE (Phase 8) is the most likely to overrun and must not be rushed.
-2. **No Android hardware or emulator:** Android can only be verified through EAS
-   cloud builds plus a device you borrow. Android behaviour will be marked untested
-   until then.
+2. **No Android hardware:** Android is verified on an emulator only (Phase 10).
+   Push, calls and real-device behaviour stay untested until a device is
+   available.
 3. **VoIP on iOS:** needs a paid developer account and a real device. The Simulator
    can't show CallKit calls, so answering through CallKit and its audio hand-off are
    unverified until then.

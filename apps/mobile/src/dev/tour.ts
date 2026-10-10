@@ -127,6 +127,7 @@ export const TOUR: Step[] = [
   { name: 'privacy', run: go('/settings/privacy') },
   { name: 'notifications', run: go('/settings/notifications') },
   { name: 'appearance', run: go('/settings/appearance') },
+  { name: 'licenses', run: go('/settings/licenses') },
   {
     name: 'voice-call',
     run: go({ pathname: '/call/[id]', params: { id: 'maya', kind: 'voice' } }),
@@ -231,10 +232,21 @@ export const MESSAGING_TOUR: Step[] = [
  * from here. Steps invoke the same handlers as the on-screen buttons.
  */
 let callPeer = '';
+/** How the last call ended: the "ended" screen lingers only briefly, so steps can miss it. */
+let lastEnded: string | null = null;
+let unwatchEnd: (() => void) | null = null;
+const watchEnd = () => {
+  lastEnded = null;
+  unwatchEnd?.();
+  unwatchEnd = callController.subscribe(() => {
+    const s = callController.getSnapshot();
+    if (s.phase === 'ended') lastEnded = s.endReason;
+  });
+};
 const callLog = (label: string) => {
   const s = callController.getSnapshot();
   console.log(
-    `[tour-call] ${label} ${JSON.stringify({ phase: s.phase, endReason: s.endReason, call: s.call?.state, kind: s.kind, mic: s.micOn, remote: s.remotePresent })}`,
+    `[tour-call] ${label} ${JSON.stringify({ phase: s.phase, endReason: s.endReason, lastEnded, call: s.call?.state, kind: s.kind, mic: s.micOn, remote: s.remotePresent })}`,
   );
 };
 const logCalls = () =>
@@ -293,6 +305,7 @@ export const CALL_TOUR: Step[] = [
     name: 'outgoing',
     shotAtMs: 1500,
     run: () => {
+      watchEnd();
       startCall(callPeer, 'voice');
       setTimeout(() => callLog('outgoing'), 1000);
     },
@@ -301,7 +314,7 @@ export const CALL_TOUR: Step[] = [
   { name: 'still-ringing', run: () => callLog('still-ringing') },
   { name: 'declined', run: () => callLog('declined') },
   { name: 'calls-history', run: () => (go('/calls')(), setTimeout(logCalls, 1500)) },
-  { name: 'done', run: () => callLog('done') },
+  { name: 'done', run: () => (callLog('done'), unwatchEnd?.()) },
 ];
 
 /**
@@ -633,6 +646,8 @@ export const MEDIA_TOUR: Step[] = [
  * library. Messages, a photo, reactions and safety numbers go both ways, then
  * an encrypted call (the peer checks LiveKit only ever forwards ciphertext).
  */
+/** When the app logged its call status; the peer checks the SFU after that. */
+let callCheckedAt = 0;
 const e2eeLog = (label: string, value?: unknown) =>
   console.log(`[tour-e2ee] ${label}${value === undefined ? '' : ` ${JSON.stringify(value)}`}`);
 const mayaChat = () => directWith(contactNamed('Maya Chen'));
@@ -710,12 +725,23 @@ export const E2EE_TOUR: Step[] = [
   { name: 'in-call', run: () => {} },
   { name: 'in-call-2', run: () => {}, shotAtMs: 1500 },
   e2eeStep('call-status', async () => {
+    callCheckedAt = 0;
+    // Media can take a while to connect (e.g. the Android emulator's network).
+    for (let i = 0; i < 60 && callController.getSnapshot().phase !== 'connected'; i++)
+      await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => setTimeout(r, 3000)); // let some audio arrive
     const s = callController.getSnapshot();
     const audio = await callController.audioStats();
     e2eeLog('call', { phase: s.phase, encrypted: s.encrypted, remote: s.remotePresent, audio });
+    callCheckedAt = Date.now();
   }),
   { name: 'in-call-3', run: () => {} },
-  e2eeStep('hang-up', async () => callController.hangUp()),
+  e2eeStep('hang-up', async () => {
+    // Stay in the call while the peer listens and inspects the SFU (about 5 s).
+    for (let i = 0; i < 80 && (!callCheckedAt || Date.now() - callCheckedAt < 12_000); i++)
+      await new Promise((r) => setTimeout(r, 500));
+    await callController.hangUp();
+  }),
   { name: 'done', run: () => e2eeLog('done') },
 ];
 

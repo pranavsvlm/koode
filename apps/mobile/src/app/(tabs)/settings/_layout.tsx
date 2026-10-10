@@ -15,6 +15,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="invites" options={{ title: 'Invitations', ...detail }} />
       <Stack.Screen name="devices" options={{ title: 'Devices', ...detail }} />
       <Stack.Screen name="recovery-key" options={{ title: 'Recovery Key', ...detail }} />
+      <Stack.Screen name="licenses" options={{ title: 'Source Code & Licences', ...detail }} />
     </Stack>
   );
 }

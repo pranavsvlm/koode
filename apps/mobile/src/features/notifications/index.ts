@@ -60,7 +60,8 @@ export function configureNotifications() {
       importance: Notifications.AndroidImportance.MAX,
       lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
       vibrationPattern: [0, 800, 600, 800, 600, 800],
-      sound: 'default',
+      // No `sound`: the channel uses the phone's default (a name would have to
+      // be a sound file bundled with the app).
     });
     void Notifications.setNotificationChannelAsync('missed-calls', {
       name: 'Missed calls',
@@ -69,12 +70,13 @@ export function configureNotifications() {
     });
   }
 
-  void Notifications.setNotificationCategoryAsync(
-    'message',
-    [],
-    // iOS: what shows when the phone's "Show Previews" hides the text.
-    { previewPlaceholder: 'Message', showTitle: true },
-  );
+  // iOS only: what shows when the phone's "Show Previews" hides the text.
+  // (Android refuses categories without actions.)
+  if (Platform.OS === 'ios')
+    void Notifications.setNotificationCategoryAsync('message', [], {
+      previewPlaceholder: 'Message',
+      showTitle: true,
+    });
   void Notifications.setNotificationCategoryAsync('call', [
     { identifier: ACTION.answer, buttonTitle: 'Answer', options: { opensAppToForeground: true } },
     {

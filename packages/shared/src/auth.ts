@@ -148,6 +148,10 @@ export const UpdateProfileRequest = z
 
 export const RotateRecoveryKeyRequest = z.object({ recoveryKey: RecoveryKey });
 
+/** Permanently delete my account (typed confirmation, so it's never accidental). */
+export const DeleteAccountRequest = z.object({ confirm: z.literal('DELETE') });
+export type DeleteAccountRequest = z.infer<typeof DeleteAccountRequest>;
+
 export const Device = z.object({
   id: z.string(),
   name: z.string(),

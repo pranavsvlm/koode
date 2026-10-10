@@ -148,5 +148,13 @@ export async function runResilience() {
     texts: theirTexts().map((m) => m.text ?? null),
     unavailable: theirTexts().filter((m) => m.undecryptable === 'missing').length,
   });
+
+  // 5. Delete the account (once Maya has read the last message).
+  await until('Maya’s acknowledgement', () => theirTexts().some((m) => m.text === 'got it, bye'));
+  await useSession.getState().deleteAccount();
+  log('deleted', {
+    status: useSession.getState().status,
+    cachedChats: Object.keys(useChat.getState().conversations).length,
+  });
   console.log('[tour] 1 done');
 }

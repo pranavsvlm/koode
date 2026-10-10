@@ -71,8 +71,13 @@ await call(`/calls/${ringing.call.id}/end`, {}, maya.token);
 // it at once, so the app declines it).
 await waitForLog(/\[tour-push\] call-me/);
 const third = await maya.startCall(app.id, 'voice');
-await sleep(4000);
-const state = (await call(`/calls/${third.call.id}`, undefined, maya.token)).state;
+let state = null;
+await waitFor(
+  async () =>
+    (state = (await call(`/calls/${third.call.id}`, undefined, maya.token)).state) !== 'ringing',
+  'the CallKit-ended call to be declined',
+  15_000,
+).catch(() => {});
 check('a CallKit-ended call is declined', state === 'declined', state);
 await call(`/calls/${third.call.id}/end`, {}, maya.token);
 

@@ -82,6 +82,13 @@ export default function SettingsScreen() {
           title="About Koode"
           accessory={{ type: 'value', value: `v${Constants.expoConfig?.version ?? '0.0.0'}` }}
         />
+        <ListRow
+          icon="document"
+          iconTint="text-secondary"
+          title="Source Code & Licences"
+          accessory={{ type: 'chevron' }}
+          onPress={() => router.push('/settings/licenses')}
+        />
       </ListSection>
 
       {__DEV__ && <DeveloperSection />}

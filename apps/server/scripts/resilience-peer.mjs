@@ -13,7 +13,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { checks, createPeer, metro, waitFor } from './lib/peer.mjs';
+import { call, checks, createPeer, metro, waitFor } from './lib/peer.mjs';
 
 const [invite, metroLog, mediaDir] = process.argv.slice(2);
 const { waitForLog, tourJson, appUser } = metro(metroLog);
@@ -108,4 +108,22 @@ check(
   'Maya decrypts a message from the new device',
   !!fromNew && fromNew.m.senderDevice === recovered.device,
 );
+await maya.sendText(chat, 'got it, bye');
+
+// 5. Account deletion.
+const deleted = await tour('deleted');
+check(
+  'the app signs out and keeps nothing',
+  deleted.status === 'signedOut' && deleted.cachedChats === 0,
+  deleted,
+);
+const afterDelete = (await maya.history(chat)).filter((x) => x.m.senderId === app.id);
+check(
+  'everything the account sent is deleted for Maya too',
+  afterDelete.length > 0 &&
+    afterDelete.every((x) => x.m.deletedAt !== null && x.m.envelopes.length === 0),
+  afterDelete.length,
+);
+const directory = await call('/users', null, maya.token);
+check('the account is gone from the directory', !directory.users.some((u) => u.id === app.id));
 finish();

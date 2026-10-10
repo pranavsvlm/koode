@@ -59,7 +59,7 @@ const incoming = await waitFor(async () => {
 await sleep(9000); // let it ring on screen
 await call(`/calls/${incoming.id}/decline`, {}, maya.token);
 const declined = await tourJson('call', 'declined');
-check('app shows “declined”', declined.endReason === 'declined', declined);
+check('app showed “declined”', declined.lastEnded === 'declined', declined);
 
 const { calls } = await call('/calls', undefined, maya.token);
 check(

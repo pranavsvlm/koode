@@ -22,6 +22,8 @@ type SessionState = {
   refreshProfile: () => Promise<void>;
   updateProfile: (patch: { displayName?: string; about?: string }) => Promise<void>;
   signOut: () => Promise<void>;
+  /** Permanently delete the account and everything on this device. */
+  deleteAccount: () => Promise<void>;
 };
 
 /**
@@ -64,6 +66,13 @@ export const useSession = create<SessionState>()(
 
       signOut: async () => {
         await authClient.logout();
+        await useChat.getState().unload();
+        clearNotifications();
+        set({ status: 'signedOut', user: null });
+      },
+
+      deleteAccount: async () => {
+        await authClient.deleteAccount(); // throws (and keeps everything) if the server refuses
         await useChat.getState().unload();
         clearNotifications();
         set({ status: 'signedOut', user: null });

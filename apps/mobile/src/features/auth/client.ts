@@ -182,6 +182,13 @@ export function createAuthClient(deps: AuthClientDeps) {
       }
     },
 
+    /** Permanently delete the account (server side), then wipe this device's secrets. */
+    async deleteAccount() {
+      await authed('/v1/me', OkResponse, { method: 'DELETE', body: { confirm: 'DELETE' } });
+      access = null;
+      await deps.keystore.wipe();
+    },
+
     getAccessToken,
     /** Authenticated request with automatic renewal (used by messaging). */
     request: authed,

@@ -519,6 +519,63 @@ export class ConversationRoom extends DurableObject<Env> {
     return { ok: true, value: message };
   }
 
+  /**
+   * Account deletion: every message this person sent here is deleted for
+   * everyone (ciphertext and files erased) under one new revision, and they
+   * leave (groups record it; a direct chat just loses them).
+   */
+  async eraseAccount(input: { conversationId: string; userId: string }): Promise<RoomResult<null>> {
+    if (!(await this.load(input.conversationId))) return { ok: true, value: null };
+    const db = this.env.DB;
+    const { results: files } = await db
+      .prepare('SELECT id FROM attachments WHERE conversation_id = ? AND uploader_id = ?')
+      .bind(input.conversationId, input.userId)
+      .all<{ id: string }>();
+    const rev = this.nextRev();
+    const mine = 'SELECT id FROM messages WHERE conversation_id = ?1 AND sender_id = ?2';
+    await db.batch([
+      db
+        .prepare(`DELETE FROM message_envelopes WHERE message_id IN (${mine})`)
+        .bind(input.conversationId, input.userId),
+      db
+        .prepare(
+          `UPDATE messages SET deleted_at = COALESCE(deleted_at, ?3), body = '', reply_to_id = NULL,
+             attachment_id = NULL, rev = ?4
+           WHERE conversation_id = ?1 AND sender_id = ?2 AND kind != 'system'`,
+        )
+        .bind(input.conversationId, input.userId, Date.now(), rev),
+      db
+        .prepare('DELETE FROM attachments WHERE conversation_id = ? AND uploader_id = ?')
+        .bind(input.conversationId, input.userId),
+      this.bumpConversation(null, rev, 0),
+    ]);
+    if (files.length)
+      this.ctx.waitUntil(
+        this.env.MEDIA.delete(files.flatMap((f) => attachmentKeys(input.conversationId, f.id))),
+      );
+    if (this.members.has(input.userId)) {
+      if (this.info.kind === 'group') {
+        const left = await this.removeMember({
+          conversationId: input.conversationId,
+          userId: input.userId,
+          targetId: input.userId,
+        });
+        if (!left.ok) return left;
+      } else {
+        await db
+          .prepare('DELETE FROM conversation_members WHERE conversation_id = ? AND user_id = ?')
+          .bind(input.conversationId, input.userId)
+          .run();
+        this.members.delete(input.userId);
+      }
+    }
+    this.broadcast(this.members.keys(), {
+      type: 'conversation',
+      conversationId: input.conversationId,
+    });
+    return { ok: true, value: null };
+  }
+
   /** Remove someone (admin), or leave (anyone, `targetId === userId`). */
   async removeMember(input: {
     conversationId: string;

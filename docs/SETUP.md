@@ -350,9 +350,65 @@ end. Restart Metro without the variable to stop the tour.
 3. Development builds use the APNs sandbox; TestFlight builds use production. The app
    reports which one it uses.
 
-## 4. Android (cloud builds through EAS)
+## 4. Android
 
-There is no Android device or emulator here, so Android builds run on Expo's servers.
+### Local builds and the emulator
+
+A free, user-level toolchain (no sudo):
+
+```sh
+# JDK 17 (Temurin) into ~/Library/Java/JavaVirtualMachines
+curl -L -o jdk17.tar.gz "https://api.adoptium.net/v3/binary/latest/17/ga/mac/aarch64/jdk/hotspot/normal/eclipse"
+tar -xzf jdk17.tar.gz -C ~/Library/Java/JavaVirtualMachines
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+
+# Android command-line tools into ~/Library/Android/sdk/cmdline-tools/latest, then:
+export ANDROID_HOME=~/Library/Android/sdk
+sdkmanager --licenses            # Google's SDK licence terms
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" \
+  "ndk;27.1.12297006" "cmake;3.22.1" "emulator" "system-images;android-36;google_apis;arm64-v8a"
+avdmanager create avd -n koode -k "system-images;android-36;google_apis;arm64-v8a" -d pixel_6
+emulator -avd koode -no-window -no-audio &      # or with a window
+```
+
+Build and run (the versions match React Native 0.86):
+
+```sh
+cd apps/mobile
+APP_VARIANT=development npx expo prebuild -p android
+echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+(cd android && ./gradlew assembleDebug)     # app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb reverse tcp:8081 tcp:8081 && adb reverse tcp:8787 tcp:8787 && adb reverse tcp:7880 tcp:7880
+```
+
+`adb reverse` lets the emulator reach Metro, the Worker and LiveKit signalling on the
+Mac as `localhost`. On a slow or unreliable network, raise Gradle's download timeouts
+in `~/.gradle/gradle.properties` (`systemProp.org.gradle.internal.http.socketTimeout`
+and `...repository.max.retries`).
+
+Open the dev client on Metro directly, and grant what a test can't tap:
+
+```sh
+adb shell pm grant com.navoasis.koode.dev android.permission.POST_NOTIFICATIONS
+adb shell pm grant com.navoasis.koode.dev android.permission.RECORD_AUDIO
+adb shell am start -a android.intent.action.VIEW \
+  -d "exp+koode://expo-development-client/?url=http%3A%2F%2Flocalhost%3A8081" com.navoasis.koode.dev
+```
+
+The device test tours and peers work the same as on iOS. Copy test files with
+`adb push` + `run-as com.navoasis.koode.dev` into `files/e2e/`. **Calls can't connect
+from the emulator to a local LiveKit:**
+
+- the emulator can't route to the Mac's LAN address, which LiveKit advertises for
+  media;
+- `adb reverse` only forwards TCP.
+
+Test Android calls on a real phone on the same network, or against a reachable
+LiveKit server.
+
+### Cloud builds through EAS
+
 The free tier has a monthly build quota.
 
 ```sh

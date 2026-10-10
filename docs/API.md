@@ -29,14 +29,15 @@ The signed message is
 
 ## Account
 
-| Method | Path                  | Auth | Purpose                                    |
-| ------ | --------------------- | ---- | ------------------------------------------ |
-| GET    | `/v1/me`              | 🔒   | Your profile                               |
-| PATCH  | `/v1/me`              | 🔒   | `{displayName?, about?}`                   |
-| PUT    | `/v1/me/recovery-key` | 🔒   | `{recoveryKey}`: replaces the recovery key |
-| GET    | `/v1/devices`         | 🔒   | Your active devices (with `current`)       |
-| PATCH  | `/v1/devices/:id`     | 🔒   | `{name}`                                   |
-| DELETE | `/v1/devices/:id`     | 🔒   | Remove a device (signs it out immediately) |
+| Method | Path                  | Auth | Purpose                                                                                                                                                                                                                                                               |
+| ------ | --------------------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/v1/me`              | 🔒   | Your profile                                                                                                                                                                                                                                                          |
+| PATCH  | `/v1/me`              | 🔒   | `{displayName?, about?}`                                                                                                                                                                                                                                              |
+| PUT    | `/v1/me/recovery-key` | 🔒   | `{recoveryKey}`: replaces the recovery key                                                                                                                                                                                                                            |
+| DELETE | `/v1/me`              | 🔒   | `{confirm: 'DELETE'}`: deletes the account. Every device and session is revoked; keys, push registrations and unused invites go; everything the account sent is deleted for everyone; it leaves its groups (admin handed over). The profile becomes "Deleted account" |
+| GET    | `/v1/devices`         | 🔒   | Your active devices (with `current`)                                                                                                                                                                                                                                  |
+| PATCH  | `/v1/devices/:id`     | 🔒   | `{name}`                                                                                                                                                                                                                                                              |
+| DELETE | `/v1/devices/:id`     | 🔒   | Remove a device (signs it out immediately)                                                                                                                                                                                                                            |
 
 ## Invites
 

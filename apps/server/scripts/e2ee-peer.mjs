@@ -69,7 +69,7 @@ async function main() {
 
   const received = await tour('received');
   check(
-    'app decrypted Maya’s text (Node → Swift)',
+    'app decrypted Maya’s text (Node libsignal → app)',
     received.texts?.includes(hello.body),
     received.texts,
   );
@@ -92,7 +92,7 @@ async function main() {
   }, 'the app’s text, photo and reaction');
   const errors = fromApp.filter((x) => x.error);
   check(
-    'decrypted everything the app sent (Swift → Node)',
+    'decrypted everything the app sent (app → Node libsignal)',
     errors.length === 0,
     errors.map((x) => x.error),
   );
